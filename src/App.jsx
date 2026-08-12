@@ -1,562 +1,549 @@
-/* global __firebase_config, __app_id, __initial_auth_token */
-import React, { useState, useEffect, useMemo } from 'react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, signInAnonymously, signInWithCustomToken } from 'firebase/auth';
-import { getFirestore, collection, addDoc, onSnapshot, deleteDoc, doc, serverTimestamp, query, orderBy } from 'firebase/firestore';
-import { Music, Plus, Search, LogOut, ChevronRight, CheckCircle2, ListMusic, User as UserIcon, X, FileText, Trash2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { 
+  Plus, 
+  Search, 
+  Filter, 
+  Trash2, 
+  Edit2, 
+  X, 
+  Save, 
+  BookOpen,
+  Mic2,
+  ListMusic,
+  ListPlus,
+  ArrowLeft,
+  CheckCircle2,
+  PlaySquare
+} from 'lucide-react';
 
-const getFirebaseConfig = () => {
-    if (typeof window !== 'undefined' && window.__firebase_config) return JSON.parse(window.__firebase_config);
-    if (typeof __firebase_config !== 'undefined') return JSON.parse(__firebase_config);
-    // NOTE: If testing locally outside of the immersive view, you can paste your actual Firebase config object here instead of {}
-    return {}; 
-};
+// Inline UI Components to ensure the preview works without external UI libraries
+const Card = ({ children, className = '', onClick }) => (
+  <div onClick={onClick} className={`bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden ${className}`}>
+    {children}
+  </div>
+);
+const CardHeader = ({ children, className = '' }) => (
+  <div className={`p-6 pb-3 ${className}`}>{children}</div>
+);
+const CardTitle = ({ children, className = '' }) => (
+  <h3 className={`text-xl font-bold text-slate-800 ${className}`}>{children}</h3>
+);
+const CardContent = ({ children, className = '' }) => (
+  <div className={`px-6 pb-4 flex-grow ${className}`}>{children}</div>
+);
+const CardFooter = ({ children, className = '' }) => (
+  <div className={`px-6 py-4 bg-slate-50 border-t border-slate-100 flex items-center ${className}`}>{children}</div>
+);
 
-const firebaseConfig = getFirebaseConfig();
-const appId = typeof window !== 'undefined' && window.__app_id ? window.__app_id : (typeof __app_id !== 'undefined' ? __app_id : 'myrepertoiregithub');
+const GENRES = [
+  'Pop', 'Rock', 'Folk', 'Acoustic Rock', 'Folk Pop', 
+  'Blues', 'Jazz', 'Classical', 'Country', 'R&B', 'Other'
+];
 
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
+const initialSongs = [
+  { id: 1, name: 'Wonderwall', genre: 'Acoustic Rock', text: 'Today is gonna be the day\nThat they\'re gonna throw it back to you\nBy now you should\'ve somehow\nRealized what you gotta do', lastPracticed: '2023-10-10' },
+  { id: 2, name: 'Fast Car', genre: 'Folk Pop', text: 'You got a fast car\nI want a ticket to anywhere\nMaybe we make a deal\nMaybe together we can get somewhere', lastPracticed: '2023-10-12' },
+  { id: 3, name: 'Hallelujah', genre: 'Folk', text: 'I\'ve heard there was a secret chord\nThat David played, and it pleased the Lord\nBut you don\'t really care for music, do you?', lastPracticed: '2023-10-05' },
+];
 
-// Authentication Component
-const AuthScreen = ({ isLoginMode, setIsLoginMode }) => {
-    const [email, setEmail] = useState('');
-    const [password, setPassword] = useState('');
-    const [error, setError] = useState('');
-    const [loading, setLoading] = useState(false);
+const initialPlaylists = [
+  { id: 101, name: 'Coffee Shop Gig', songIds: [1, 2] },
+  { id: 102, name: 'Practice List', songIds: [3] }
+];
 
-    const handleSubmit = async (e) => {
-        e.preventDefault();
-        setError('');
-        setLoading(true);
-        try {
-            if (isLoginMode) {
-                await signInWithEmailAndPassword(auth, email, password);
-            } else {
-                await createUserWithEmailAndPassword(auth, email, password);
-            }
-        } catch (err) {
-            console.error("Auth error:", err);
-            setError(err.message.replace('Firebase: ', ''));
-        } finally {
-            setLoading(false);
-        }
+export default function RepertoireApp() {
+  // App State
+  const [songs, setSongs] = useState(() => {
+    try {
+      const saved = localStorage.getItem('repertoire-songs');
+      return saved ? JSON.parse(saved) : initialSongs;
+    } catch { return initialSongs; }
+  });
+  
+  const [playlists, setPlaylists] = useState(() => {
+    try {
+      const saved = localStorage.getItem('repertoire-playlists');
+      return saved ? JSON.parse(saved) : initialPlaylists;
+    } catch { return initialPlaylists; }
+  });
+
+  const [view, setView] = useState('songs'); // 'songs' or 'playlists'
+  
+  // Song List State
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedGenre, setSelectedGenre] = useState('All');
+  
+  // Song Form State
+  const [isAddingMode, setIsAddingMode] = useState(false);
+  const [editingSongId, setEditingSongId] = useState(null);
+  const [formData, setFormData] = useState({ name: '', genre: 'Pop', text: '' });
+  
+  // Playlist State
+  const [activePlaylistId, setActivePlaylistId] = useState(null);
+  const [playlistModal, setPlaylistModal] = useState({ isOpen: false, songId: null });
+  const [newPlaylistName, setNewPlaylistName] = useState('');
+  const [isCreatingPlaylist, setIsCreatingPlaylist] = useState(false);
+
+  // Save to LocalStorage
+  useEffect(() => {
+    localStorage.setItem('repertoire-songs', JSON.stringify(songs));
+  }, [songs]);
+
+  useEffect(() => {
+    localStorage.setItem('repertoire-playlists', JSON.stringify(playlists));
+  }, [playlists]);
+
+  // Song Handlers
+  const handleAddNew = () => {
+    setIsAddingMode(true);
+    setEditingSongId(null);
+    setFormData({ name: '', genre: 'Pop', text: '' });
+  };
+
+  const handleEdit = (song) => {
+    setIsAddingMode(true);
+    setEditingSongId(song.id);
+    setFormData({ name: song.name, genre: song.genre, text: song.text });
+  };
+
+  const handleDelete = (id) => {
+    setSongs(songs.filter(s => s.id !== id));
+    // Remove deleted song from all playlists
+    setPlaylists(playlists.map(p => ({
+      ...p,
+      songIds: p.songIds.filter(songId => songId !== id)
+    })));
+  };
+
+  const handleSaveSong = (e) => {
+    e.preventDefault();
+    if (!formData.name.trim()) return;
+
+    if (editingSongId) {
+      setSongs(songs.map(s => s.id === editingSongId ? { ...s, ...formData } : s));
+    } else {
+      const newSong = {
+        ...formData,
+        id: Date.now(),
+        lastPracticed: new Date().toISOString().split('T')[0]
+      };
+      setSongs([newSong, ...songs]);
+    }
+    setIsAddingMode(false);
+    setFormData({ name: '', genre: 'Pop', text: '' });
+  };
+
+  // Playlist Handlers
+  const handleCreatePlaylist = (e) => {
+    e.preventDefault();
+    if (!newPlaylistName.trim()) return;
+    const newPlaylist = {
+      id: Date.now(),
+      name: newPlaylistName,
+      songIds: []
     };
+    setPlaylists([newPlaylist, ...playlists]);
+    setNewPlaylistName('');
+    setIsCreatingPlaylist(false);
+  };
 
-    return (
-        <div className="min-h-screen bg-slate-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8 font-sans">
-            <div className="sm:mx-auto sm:w-full sm:max-w-md">
-                <div className="flex justify-center text-indigo-600 mb-6">
-                    <Music size={48} strokeWidth={1.5} />
-                </div>
-                <h2 className="text-center text-3xl font-extrabold text-slate-900">
-                    {isLoginMode ? 'Sign in to Jam Session' : 'Create an Account'}
-                </h2>
-                <p className="mt-2 text-center text-sm text-slate-600">
-                    {isLoginMode ? 'Or ' : 'Already have an account? '}
-                    <button onClick={() => setIsLoginMode(!isLoginMode)} className="font-medium text-indigo-600 hover:text-indigo-500 focus:outline-none focus:underline transition ease-in-out duration-150">
-                        {isLoginMode ? 'create a new account' : 'sign in instead'}
-                    </button>
-                </p>
-            </div>
+  const handleDeletePlaylist = (id) => {
+    setPlaylists(playlists.filter(p => p.id !== id));
+    if (activePlaylistId === id) setActivePlaylistId(null);
+  };
 
-            <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
-                <div className="bg-white py-8 px-4 shadow sm:rounded-lg sm:px-10 border border-slate-100">
-                    <form className="space-y-6" onSubmit={handleSubmit}>
-                        {error && (
-                            <div className="bg-red-50 border-l-4 border-red-400 p-4">
-                                <p className="text-sm text-red-700">{error}</p>
-                            </div>
-                        )}
-                        <div>
-                            <label className="block text-sm font-medium text-slate-700">Email address</label>
-                            <div className="mt-1">
-                                <input
-                                    type="email"
-                                    required
-                                    value={email}
-                                    onChange={(e) => setEmail(e.target.value)}
-                                    className="appearance-none block w-full px-3 py-2 border border-slate-300 rounded-md shadow-sm placeholder-slate-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                                />
-                            </div>
-                        </div>
-
-                        <div>
-                            <label className="block text-sm font-medium text-slate-700">Password</label>
-                            <div className="mt-1">
-                                <input
-                                    type="password"
-                                    required
-                                    value={password}
-                                    onChange={(e) => setPassword(e.target.value)}
-                                    className="appearance-none block w-full px-3 py-2 border border-slate-300 rounded-md shadow-sm placeholder-slate-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                                />
-                            </div>
-                        </div>
-
-                        <div>
-                            <button
-                                type="submit"
-                                disabled={loading}
-                                className={`w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${loading ? 'opacity-70 cursor-not-allowed' : ''}`}
-                            >
-                                {loading ? 'Processing...' : (isLoginMode ? 'Sign in' : 'Create account')}
-                            </button>
-                        </div>
-                    </form>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-// Modal Components
-const Modal = ({ isOpen, onClose, title, children }) => {
-    if (!isOpen) return null;
-    return (
-        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden flex flex-col animate-in fade-in zoom-in-95 duration-200">
-                <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-                    <h3 className="font-semibold text-slate-800">{title}</h3>
-                    <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition p-1 rounded-md hover:bg-slate-200">
-                        <X size={20} />
-                    </button>
-                </div>
-                {children}
-            </div>
-        </div>
-    );
-};
-
-const LyricsModal = ({ isOpen, onClose, song }) => {
-    if (!isOpen || !song) return null;
-    return (
-        <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm z-50 flex items-center justify-center p-2 md:p-4">
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl h-[85vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-                <div className="p-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 shrink-0">
-                    <div className="flex-1 min-w-0 pr-4">
-                        <h3 className="font-bold text-slate-800 text-xl truncate">{song.title}</h3>
-                        {song.artist && <p className="text-sm text-slate-500 truncate">{song.artist}</p>}
-                    </div>
-                    <button onClick={onClose} className="text-slate-500 hover:text-slate-700 bg-slate-200 hover:bg-slate-300 p-2 rounded-full transition shrink-0">
-                        <X size={24} />
-                    </button>
-                </div>
-                <div className="p-4 md:p-6 overflow-y-auto flex-1 bg-white">
-                    <pre className="font-sans text-slate-800 whitespace-pre-wrap text-base md:text-lg leading-relaxed max-w-xl mx-auto md:mx-0">
-                        {song.lyrics || 'No lyrics provided for this song.'}
-                    </pre>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-// Main App Component
-export default function App() {
-    // State
-    const [user, setUser] = useState(null);
-    const [authLoading, setAuthLoading] = useState(true);
-    const [isLoginMode, setIsLoginMode] = useState(true);
-    const [repertoire, setRepertoire] = useState([]);
-    const [wishlist, setWishlist] = useState([]);
-    const [searchTerm, setSearchTerm] = useState('');
-    
-    // UI State
-    const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-    const [selectedSongLyrics, setSelectedSongLyrics] = useState(null);
-    
-    // New Song Form State
-    const [newSong, setNewSong] = useState({ title: '', artist: '', genre: 'Uncategorized', lyrics: '' });
-    const genres = ["Jazz", "Pop", "Rock", "Blues", "Classical", "Folk / Traditional", "Klezmer", "Other", "Uncategorized"];
-
-    // Firebase Auth Listener
-    useEffect(() => {
-        const initAuth = async () => {
-             // In this version, we require explicit login, but we handle the immersive token if present
-             const token = typeof window !== 'undefined' && window.__initial_auth_token ? window.__initial_auth_token : (typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : undefined);
-             
-             if (token) {
-                 try {
-                     await signInWithCustomToken(auth, token);
-                 } catch (e) {
-                     console.error("Custom token auth failed, falling back to manual login", e);
-                 }
-             }
+  const toggleSongInPlaylist = (playlistId, songId) => {
+    setPlaylists(playlists.map(p => {
+      if (p.id === playlistId) {
+        const hasSong = p.songIds.includes(songId);
+        return {
+          ...p,
+          songIds: hasSong ? p.songIds.filter(id => id !== songId) : [...p.songIds, songId]
         };
-        initAuth();
+      }
+      return p;
+    }));
+  };
 
-        const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-            setUser(currentUser);
-            setAuthLoading(false);
-        });
-        return () => unsubscribe();
-    }, []);
+  // Filtered Data
+  const filteredSongs = songs.filter(song => {
+    const matchesSearch = song.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                          (song.text && song.text.toLowerCase().includes(searchTerm.toLowerCase()));
+    const matchesGenre = selectedGenre === 'All' || song.genre === selectedGenre;
+    return matchesSearch && matchesGenre;
+  });
 
-    // Firestore Listeners
-    useEffect(() => {
-        if (!user) {
-            setRepertoire([]);
-            setWishlist([]);
-            return;
-        }
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
+      {/* Header */}
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm">
+        <div className="max-w-5xl mx-auto px-4 py-4 flex flex-col sm:flex-row justify-between items-center gap-4">
+          <div className="flex items-center gap-3">
+            <div className="bg-indigo-600 p-2.5 rounded-xl text-white shadow-md">
+              <Mic2 size={24} />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-slate-800 tracking-tight leading-tight">Repertoire</h1>
+              <p className="text-xs text-slate-500 font-medium">{songs.length} tracks ready to play</p>
+            </div>
+          </div>
+          
+          <div className="flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto">
+            <div className="flex bg-slate-100 p-1 rounded-xl w-full sm:w-auto border border-slate-200">
+              <button
+                onClick={() => { setView('songs'); setActivePlaylistId(null); }}
+                className={`flex-1 sm:px-6 py-2 rounded-lg text-sm font-semibold transition-all ${view === 'songs' ? 'bg-white shadow-sm text-indigo-700' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                Library
+              </button>
+              <button
+                onClick={() => setView('playlists')}
+                className={`flex-1 sm:px-6 py-2 rounded-lg text-sm font-semibold transition-all flex items-center justify-center gap-2 ${view === 'playlists' ? 'bg-white shadow-sm text-indigo-700' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                <ListMusic size={16} />
+                Playlists
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
 
-        // We use the same public paths as before so everyone sees the same jam session data
-        const repRef = collection(db, 'artifacts', appId, 'public', 'data', 'repertoire');
-        const wishRef = collection(db, 'artifacts', appId, 'public', 'data', 'wishlist');
-
-        const unsubRep = onSnapshot(repRef, (snapshot) => {
-            const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            setRepertoire(data);
-        }, (error) => console.error("Repertoire Error:", error));
-
-        const unsubWish = onSnapshot(wishRef, (snapshot) => {
-            const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            setWishlist(data);
-        }, (error) => console.error("Wishlist Error:", error));
-
-        return () => {
-            unsubRep();
-            unsubWish();
-        };
-    }, [user]);
-
-    // Handlers
-    const handleLogout = () => signOut(auth);
-
-    const handleAddSong = async (e) => {
-        e.preventDefault();
-        if (!newSong.title.trim() || !user) return;
-
-        try {
-            const repRef = collection(db, 'artifacts', appId, 'public', 'data', 'repertoire');
-            await addDoc(repRef, {
-                title: newSong.title.trim(),
-                artist: newSong.artist.trim(),
-                genre: newSong.genre,
-                lyrics: newSong.lyrics.trim(),
-                addedBy: user.email,
-                userId: user.uid,
-                timestamp: Date.now()
-            });
-            setIsAddModalOpen(false);
-            setNewSong({ title: '', artist: '', genre: 'Uncategorized', lyrics: '' });
-        } catch (error) {
-            console.error("Error adding song:", error);
-            alert("Could not save song.");
-        }
-    };
-
-    const handleAddToWishlist = async (song) => {
-        if (!user) return;
+      <main className="max-w-5xl mx-auto px-4 py-8 relative">
         
-        // Prevent duplicates in queue
-        if (wishlist.some(w => w.songId === song.id)) {
-            alert("This song is already in the queue!");
-            return;
-        }
+        {        playlistModal.isOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm overflow-hidden flex flex-col max-h-[80vh]">
+              <div className="flex justify-between items-center p-4 border-b border-slate-100 bg-slate-50">
+                <h3 className="font-semibold text-slate-800">Add to Playlist</h3>
+                <button onClick={() => setPlaylistModal({ isOpen: false, songId: null })} className="text-slate-400 hover:text-slate-700 p-1.5 rounded-full hover:bg-slate-200 transition-colors">
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="p-2 overflow-y-auto flex-grow">
+                {playlists.length === 0 ? (
+                  <p className="text-sm text-slate-500 text-center p-6">No playlists yet. Create one below!</p>
+                ) : (
+                  playlists.map(playlist => {
+                    const isInPlaylist = playlist.songIds.includes(playlistModal.songId);
+                    return (
+                      <button
+                        key={playlist.id}
+                        onClick={() => toggleSongInPlaylist(playlist.id, playlistModal.songId)}
+                        className="w-full flex items-center justify-between p-3 hover:bg-slate-50 rounded-xl transition-colors text-left"
+                      >
+                        <span className="font-medium text-slate-700">{playlist.name}</span>
+                        {isInPlaylist ? (
+                          <CheckCircle2 size={20} className="text-indigo-600" />
+                        ) : (
+                          <Plus size={20} className="text-slate-300" />
+                        )}
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+              <div className="p-4 border-t border-slate-100 bg-white">
+                <button 
+                  onClick={() => {
+                    setPlaylistModal({ isOpen: false, songId: null });
+                    setView('playlists');
+                    setIsCreatingPlaylist(true);
+                  }}
+                  className="w-full py-2.5 text-sm font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 rounded-xl transition-colors"
+                >
+                  Create New Playlist
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
-        try {
-            const wishRef = collection(db, 'artifacts', appId, 'public', 'data', 'wishlist');
-            await addDoc(wishRef, {
-                songId: song.id,
-                title: song.title,
-                artist: song.artist,
-                genre: song.genre || "Uncategorized",
-                lyrics: song.lyrics || "",
-                requestedBy: user.email.split('@')[0], // Use part of email as username for display
-                requesterId: user.uid,
-                timestamp: Date.now()
-            });
-        } catch (error) {
-            console.error("Error adding to wishlist:", error);
-        }
-    };
-
-    const handleRemoveFromWishlist = async (id) => {
-        if (!user) return;
-        try {
-            await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'wishlist', id));
-        } catch (error) {
-            console.error("Error removing from wishlist:", error);
-        }
-    };
-
-    const handleDeleteFromRepertoire = async (songId) => {
-         if (!user) return;
-         if(!window.confirm("Are you sure you want to delete this song from the repertoire?")) return;
-
-         try {
-             await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'repertoire', songId));
-             
-             // Also remove from wishlist if present
-             const relatedWishlistItems = wishlist.filter(w => w.songId === songId);
-             for (const item of relatedWishlistItems) {
-                 await handleRemoveFromWishlist(item.id);
-             }
-         } catch (error) {
-             console.error("Error deleting song:", error);
-         }
-    };
-
-    // Derived Data Processing
-    const processedRepertoire = useMemo(() => {
-        // Filter
-        const filtered = repertoire.filter(song => {
-            const term = searchTerm.toLowerCase();
-            return (song.title && song.title.toLowerCase().includes(term)) || 
-                   (song.artist && song.artist.toLowerCase().includes(term));
-        });
-
-        // Group
-        const grouped = filtered.reduce((acc, song) => {
-            const g = song.genre && genres.includes(song.genre) ? song.genre : 'Uncategorized';
-            if (!acc[g]) acc[g] = [];
-            acc[g].push(song);
-            return acc;
-        }, {});
-
-        // Sort Groups
-        const sortedGroups = {};
-        Object.keys(grouped).sort((a, b) => {
-            if (a === 'Uncategorized') return 1;
-            if (b === 'Uncategorized') return -1;
-            return a.localeCompare(b);
-        }).forEach(key => {
-            // Sort songs within groups alphabetically
-            sortedGroups[key] = grouped[key].sort((a, b) => (a.title || "").localeCompare(b.title || ""));
-        });
-
-        return sortedGroups;
-    }, [repertoire, searchTerm]);
-
-    const sortedWishlist = useMemo(() => {
-        return [...wishlist].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-    }, [wishlist]);
-
-    if (authLoading) {
-        return <div className="h-screen w-full flex items-center justify-center bg-slate-50"><div className="animate-spin text-indigo-600"><Music size={32} /></div></div>;
-    }
-
-    if (!user) {
-        return <AuthScreen isLoginMode={isLoginMode} setIsLoginMode={setIsLoginMode} />;
-    }
-
-    return (
-        <div className="bg-slate-100 min-h-screen flex flex-col font-sans text-slate-800">
-            {/* Header */}
-            <header className="bg-indigo-700 text-white shadow-md z-10 px-4 py-3 flex justify-between items-center shrink-0">
-                <div className="flex items-center gap-3">
-                    <Music className="w-6 h-6 sm:w-8 sm:h-8 text-indigo-200" />
-                    <h1 className="text-lg sm:text-xl font-bold tracking-tight">Clarinet Jam</h1>
+        {}
+        {view === 'playlists' && (
+          <div className="animate-in fade-in slide-in-from-bottom-4 duration-300">
+            {!activePlaylistId ? (
+              <>
+                <div className="flex justify-between items-center mb-6">
+                  <h2 className="text-2xl font-bold text-slate-800">Your Playlists</h2>
+                  <button 
+                    onClick={() => setIsCreatingPlaylist(true)}
+                    className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-xl font-medium hover:bg-indigo-700 transition-all shadow-sm"
+                  >
+                    <Plus size={18} /> New Playlist
+                  </button>
                 </div>
-                <div className="flex items-center gap-3">
-                    <div className="hidden sm:flex items-center gap-2 bg-indigo-800/50 px-3 py-1 rounded-full text-sm">
-                        <UserIcon size={14} className="text-indigo-300" />
-                        <span className="truncate max-w-[120px]">{user.email}</span>
-                    </div>
-                    <button 
-                        onClick={handleLogout}
-                        className="text-indigo-200 hover:text-white hover:bg-indigo-600 p-2 rounded-full transition flex items-center gap-1"
-                        title="Sign Out"
-                    >
-                        <LogOut size={18} />
-                    </button>
-                </div>
-            </header>
 
-            {/* Main Content */}
-            <main className="flex-1 flex flex-col md:flex-row p-2 sm:p-4 gap-4 overflow-hidden h-[calc(100vh-60px)]">
-                
-                {/* Repertoire Section */}
-                <section className="flex-1 bg-white rounded-xl shadow-sm border border-slate-200 flex flex-col overflow-hidden h-full">
-                    <div className="p-4 border-b border-slate-100 bg-slate-50 flex flex-col gap-3 shrink-0">
-                        <div className="flex justify-between items-center">
-                            <h2 className="text-lg font-semibold text-slate-700 flex items-center gap-2">
-                                <ListMusic size={20} className="text-indigo-500" />
-                                Repertoire Book
-                            </h2>
+                {isCreatingPlaylist && (
+                  <Card className="mb-6 border-indigo-200 bg-indigo-50/50">
+                    <form onSubmit={handleCreatePlaylist} className="p-4 flex flex-col sm:flex-row gap-3 items-center">
+                      <input 
+                        autoFocus
+                        type="text" 
+                        value={newPlaylistName}
+                        onChange={(e) => setNewPlaylistName(e.target.value)}
+                        placeholder="My Awesome Gig..."
+                        className="flex-1 w-full p-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
+                        required
+                      />
+                      <div className="flex gap-2 w-full sm:w-auto">
+                        <button type="button" onClick={() => setIsCreatingPlaylist(false)} className="flex-1 sm:flex-none px-4 py-2.5 text-slate-600 hover:bg-slate-200 rounded-xl font-medium transition-colors">Cancel</button>
+                        <button type="submit" className="flex-1 sm:flex-none px-6 py-2.5 bg-indigo-600 text-white rounded-xl font-medium hover:bg-indigo-700 transition-colors shadow-sm">Save</button>
+                      </div>
+                    </form>
+                  </Card>
+                )}
+
+                {playlists.length === 0 && !isCreatingPlaylist ? (
+                  <div className="text-center py-20 bg-white rounded-3xl border border-dashed border-slate-300 shadow-sm">
+                    <PlaySquare size={48} className="mx-auto text-slate-300 mb-4" />
+                    <h3 className="text-lg font-semibold text-slate-700 mb-2">No playlists created</h3>
+                    <p className="text-slate-500 mb-6">Group your songs for gigs, practice, or themes.</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                    {playlists.map(playlist => (
+                      <Card key={playlist.id} className="cursor-pointer hover:shadow-md transition-all hover:border-indigo-300 group" onClick={() => setActivePlaylistId(playlist.id)}>
+                        <CardContent className="p-6 pt-6 flex flex-col h-full">
+                          <div className="flex justify-between items-start mb-4">
+                            <div className="bg-indigo-100 text-indigo-600 p-3 rounded-xl group-hover:bg-indigo-600 group-hover:text-white transition-colors shadow-sm">
+                              <ListMusic size={24} />
+                            </div>
                             <button 
-                                onClick={() => setIsAddModalOpen(true)}
-                                className="bg-indigo-600 text-white hover:bg-indigo-700 px-3 py-1.5 rounded-md text-sm font-medium transition flex items-center gap-1 shadow-sm"
+                              onClick={(e) => { e.stopPropagation(); handleDeletePlaylist(playlist.id); }}
+                              className="text-slate-400 hover:text-red-500 p-2 rounded-lg hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100"
                             >
-                                <Plus size={16} />
-                                Add Song
+                              <Trash2 size={18} />
                             </button>
-                        </div>
-                        <div className="relative">
-                            <Search className="w-5 h-5 absolute left-3 top-2.5 text-slate-400" />
-                            <input 
-                                type="text" 
-                                placeholder="Search songs or artists..." 
-                                value={searchTerm}
-                                onChange={(e) => setSearchTerm(e.target.value)}
-                                className="w-full pl-10 pr-4 py-2 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm transition"
-                            />
-                        </div>
-                    </div>
+                          </div>
+                          <div className="mt-auto">
+                            <h3 className="text-xl font-bold text-slate-800 mb-1">{playlist.name}</h3>
+                            <p className="text-sm font-medium text-slate-500 bg-slate-100 w-fit px-2.5 py-1 rounded-md">{playlist.songIds.length} {playlist.songIds.length === 1 ? 'song' : 'songs'}</p>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div>
+                {(() => {
+                  const activePlaylist = playlists.find(p => p.id === activePlaylistId);
+                  if (!activePlaylist) return null;
+                  const playlistSongs = activePlaylist.songIds.map(id => songs.find(s => s.id === id)).filter(Boolean);
 
-                    <div className="flex-1 overflow-y-auto p-3 bg-slate-50/50">
-                        {repertoire.length === 0 ? (
-                            <div className="text-center text-slate-400 p-8 flex flex-col items-center justify-center h-full">
-                                <Music className="w-12 h-12 mb-3 text-slate-300 opacity-50" />
-                                <p>Repertoire is empty.</p>
-                                <p className="text-sm mt-1">Add your first song!</p>
-                            </div>
-                        ) : Object.keys(processedRepertoire).length === 0 ? (
-                            <div className="text-center text-slate-400 p-8">
-                                <p>No songs match "{searchTerm}".</p>
-                            </div>
-                        ) : (
-                            Object.keys(processedRepertoire).map(genre => (
-                                <div key={genre} className="mb-6">
-                                    <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3 px-2 border-b border-slate-200 pb-1 sticky top-0 bg-slate-50/95 backdrop-blur z-10">
-                                        {genre}
-                                    </h3>
-                                    <div className="flex flex-col gap-2">
-                                        {processedRepertoire[genre].map(song => (
-                                            <div key={song.id} className="group bg-white p-3 rounded-lg border border-slate-100 shadow-sm hover:border-indigo-300 hover:shadow transition flex justify-between items-center gap-2">
-                                                <div className="flex-1 min-w-0">
-                                                    <h4 className="font-semibold text-slate-800 truncate leading-tight">{song.title}</h4>
-                                                    {song.artist && <p className="text-xs text-slate-500 truncate mt-0.5">{song.artist}</p>}
-                                                </div>
-                                                <div className="flex items-center gap-1 shrink-0">
-                                                    {song.lyrics && (
-                                                        <button onClick={() => setSelectedSongLyrics(song)} className="text-slate-400 hover:text-indigo-600 p-2 rounded-full transition" title="View Lyrics">
-                                                            <FileText size={18} />
-                                                        </button>
-                                                    )}
-                                                    <button onClick={() => handleAddToWishlist(song)} className="bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white p-2 rounded-full transition" title="Add to Queue">
-                                                        <Plus size={18} />
-                                                    </button>
-                                                    {/* Optional: Only show delete if they own it or simple mode allows anyone */}
-                                                    <button onClick={() => handleDeleteFromRepertoire(song.id)} className="text-slate-300 hover:text-red-500 p-2 rounded-full transition md:opacity-0 md:group-hover:opacity-100" title="Delete Song">
-                                                        <Trash2 size={16} />
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
+                  return (
+                    <div className="animate-in fade-in slide-in-from-right-4 duration-300">
+                      <div className="flex items-center gap-4 mb-8 bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+                        <button onClick={() => setActivePlaylistId(null)} className="p-2.5 hover:bg-slate-100 rounded-xl transition-colors text-slate-600">
+                          <ArrowLeft size={24} />
+                        </button>
+                        <div>
+                          <h2 className="text-2xl font-bold text-slate-800">{activePlaylist.name}</h2>
+                          <p className="text-sm font-medium text-indigo-600">{playlistSongs.length} songs in this list</p>
+                        </div>
+                      </div>
+
+                      {playlistSongs.length === 0 ? (
+                        <div className="text-center py-20 bg-white rounded-3xl border border-dashed border-slate-300">
+                          <p className="text-slate-500 font-medium">This playlist is empty.</p>
+                          <p className="text-slate-400 text-sm mt-1">Go to your library to add some tracks!</p>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                          {playlistSongs.map((song) => (
+                            <Card key={song.id} className="flex flex-col h-full hover:shadow-md transition-shadow">
+                              <CardHeader>
+                                <span className="inline-block px-2.5 py-1 bg-indigo-50 text-indigo-700 text-xs font-bold uppercase tracking-wider rounded-md mb-3 w-fit">
+                                  {song.genre}
+                                </span>
+                                <CardTitle className="line-clamp-1">{song.name}</CardTitle>
+                              </CardHeader>
+                              <CardContent>
+                                <div className="relative h-28 overflow-hidden rounded-xl bg-slate-50 border border-slate-100 p-4">
+                                  <div className="absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-slate-50 to-transparent pointer-events-none"></div>
+                                  <p className="text-sm font-mono text-slate-600 whitespace-pre-wrap leading-relaxed">{song.text || 'No lyrics/chords added.'}</p>
                                 </div>
-                            ))
-                        )}
+                              </CardContent>
+                              <CardFooter className="justify-end bg-white">
+                                <button 
+                                  onClick={() => toggleSongInPlaylist(activePlaylist.id, song.id)}
+                                  className="text-sm text-red-600 font-medium px-4 py-2 hover:bg-red-50 rounded-xl transition-colors"
+                                >
+                                  Remove from List
+                                </button>
+                              </CardFooter>
+                            </Card>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                </section>
+                  )
+                })()}
+              </div>
+            )}
+          </div>
+        )}
 
-                {/* Wishlist Section */}
-                <section className="flex-1 bg-white rounded-xl shadow-sm border border-slate-200 flex flex-col overflow-hidden h-full">
-                    <div className="p-4 border-b border-amber-100 bg-amber-50 flex flex-col gap-3 shrink-0">
-                        <div className="flex justify-between items-center">
-                            <h2 className="text-lg font-semibold text-amber-800 flex items-center gap-2">
-                                <ListMusic size={20} className="text-amber-500" />
-                                Jam Queue
-                            </h2>
-                            <span className="bg-amber-200 text-amber-800 text-xs font-bold px-2.5 py-1 rounded-full">
-                                {sortedWishlist.length}
-                            </span>
-                        </div>
-                        <p className="text-sm text-amber-700/80">Songs requested by friends. Mark as played when done!</p>
+        {}
+        <div style={{ display: view === 'songs' ? 'block' : 'none' }}>
+          {isAddingMode ? (
+            <div className="animate-in fade-in slide-in-from-bottom-4 duration-300">
+              <Card className="max-w-2xl mx-auto shadow-md border-indigo-100">
+                <form onSubmit={handleSaveSong}>
+                  <CardHeader className="bg-indigo-50 border-b border-indigo-100">
+                    <CardTitle className="text-indigo-900">{editingSongId ? 'Edit Song' : 'Add New Song'}</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-5 pt-6">
+                    <div>
+                      <label className="block text-sm font-semibold text-slate-700 mb-1.5">Song Title</label>
+                      <input
+                        type="text"
+                        value={formData.name}
+                        onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                        className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
+                        placeholder="e.g. Wonderwall"
+                        required
+                        autoFocus
+                      />
                     </div>
-                    
-                    <div className="flex-1 overflow-y-auto p-3 bg-amber-50/30">
-                        {sortedWishlist.length === 0 ? (
-                            <div className="text-center text-amber-600/60 p-8 flex flex-col items-center justify-center h-full">
-                                <Music className="w-10 h-10 mb-2 opacity-50" />
-                                <p>The queue is empty.</p>
-                                <p className="text-sm">Click + on a song to request it.</p>
-                            </div>
-                        ) : (
-                            <div className="flex flex-col gap-2">
-                                {sortedWishlist.map((item, index) => (
-                                    <div key={item.id} className="bg-white p-3 rounded-lg border border-amber-200 shadow-sm flex items-center gap-3">
-                                        <div className="bg-amber-100 text-amber-700 font-bold rounded-full w-6 h-6 flex items-center justify-center shrink-0 text-sm">
-                                            {index + 1}
-                                        </div>
-                                        <div className="flex-1 min-w-0">
-                                            <h4 className="font-semibold text-slate-800 leading-tight truncate">{item.title}</h4>
-                                            <div className="flex items-center gap-2 mt-1 text-xs">
-                                                {item.artist && <span className="text-slate-500 truncate">{item.artist}</span>}
-                                                {item.artist && <span className="text-slate-300">•</span>}
-                                                <span className="font-medium text-amber-600 truncate">Req: {item.requestedBy}</span>
-                                            </div>
-                                        </div>
-                                        <div className="flex items-center gap-1 shrink-0">
-                                            {item.lyrics && (
-                                                <button onClick={() => setSelectedSongLyrics(item)} className="text-amber-500 hover:text-amber-700 p-2 rounded-full transition" title="View Lyrics">
-                                                    <FileText size={18} />
-                                                </button>
-                                            )}
-                                            <button onClick={() => handleRemoveFromWishlist(item.id)} className="bg-emerald-50 text-emerald-600 hover:bg-emerald-500 hover:text-white p-2 rounded-full transition" title="Mark as Played">
-                                                <CheckCircle2 size={18} />
-                                            </button>
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
+                    <div>
+                      <label className="block text-sm font-semibold text-slate-700 mb-1.5">Genre</label>
+                      <select
+                        value={formData.genre}
+                        onChange={(e) => setFormData({ ...formData, genre: e.target.value })}
+                        className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all bg-white"
+                      >
+                        {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
+                      </select>
                     </div>
-                </section>
-            </main>
-
-            {/* Modals */}
-            <Modal isOpen={isAddModalOpen} onClose={() => setIsAddModalOpen(false)} title="Add New Song">
-                <form onSubmit={handleAddSong} className="flex flex-col h-full">
-                    <div className="p-4 flex flex-col gap-4 flex-1 overflow-y-auto">
-                        <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-1">Song Title *</label>
-                            <input 
-                                type="text" 
-                                required
-                                value={newSong.title}
-                                onChange={e => setNewSong({...newSong, title: e.target.value})}
-                                className="w-full px-3 py-2 rounded-md border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500" 
-                                placeholder="e.g. Fly Me To The Moon"
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-1">Artist / Note</label>
-                            <input 
-                                type="text" 
-                                value={newSong.artist}
-                                onChange={e => setNewSong({...newSong, artist: e.target.value})}
-                                className="w-full px-3 py-2 rounded-md border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500" 
-                                placeholder="e.g. Frank Sinatra"
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-1">Genre</label>
-                            <select 
-                                value={newSong.genre}
-                                onChange={e => setNewSong({...newSong, genre: e.target.value})}
-                                className="w-full px-3 py-2 rounded-md border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
-                            >
-                                {genres.map(g => <option key={g} value={g}>{g}</option>)}
-                            </select>
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-1">Lyrics (Optional)</label>
-                            <textarea 
-                                rows="5" 
-                                value={newSong.lyrics}
-                                onChange={e => setNewSong({...newSong, lyrics: e.target.value})}
-                                className="w-full px-3 py-2 rounded-md border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-y" 
-                                placeholder="Paste lyrics here for singers..."
-                            />
-                        </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-slate-700 mb-1.5">Lyrics / Chords</label>
+                      <textarea
+                        value={formData.text}
+                        onChange={(e) => setFormData({ ...formData, text: e.target.value })}
+                        className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none min-h-[200px] font-mono text-sm transition-all resize-y"
+                        placeholder="[G]Today is gonna be the [Em]day..."
+                      />
                     </div>
-                    <div className="p-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-2 shrink-0">
-                        <button type="button" onClick={() => setIsAddModalOpen(false)} className="px-4 py-2 rounded-md text-slate-600 hover:bg-slate-200 font-medium transition">Cancel</button>
-                        <button type="submit" className="px-4 py-2 rounded-md bg-indigo-600 text-white hover:bg-indigo-700 font-medium transition shadow-sm">Save Song</button>
-                    </div>
+                  </CardContent>
+                  <CardFooter className="justify-end gap-3 bg-slate-50">
+                    <button
+                      type="button"
+                      onClick={() => setIsAddingMode(false)}
+                      className="px-5 py-2.5 text-slate-600 hover:bg-slate-200 rounded-xl font-medium transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-medium flex items-center gap-2 transition-colors shadow-sm"
+                    >
+                      <Save size={18} />
+                      Save Song
+                    </button>
+                  </CardFooter>
                 </form>
-            </Modal>
+              </Card>
+            </div>
+          ) : (
+            <div className="animate-in fade-in duration-300">
+              <div className="flex flex-col md:flex-row gap-4 mb-8">
+                <div className="relative flex-grow">
+                  <Search className="absolute left-3.5 top-1/2 transform -translate-y-1/2 text-slate-400" size={20} />
+                  <input
+                    type="text"
+                    placeholder="Search by title or lyrics..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none shadow-sm transition-all"
+                  />
+                </div>
+                <div className="relative min-w-[200px]">
+                  <Filter className="absolute left-3.5 top-1/2 transform -translate-y-1/2 text-slate-400" size={20} />
+                  <select
+                    value={selectedGenre}
+                    onChange={(e) => setSelectedGenre(e.target.value)}
+                    className="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none appearance-none shadow-sm transition-all"
+                  >
+                    <option value="All">All Genres</option>
+                    {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
+                  </select>
+                </div>
+                <button 
+                  onClick={handleAddNew}
+                  className="w-full md:w-auto flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-xl font-semibold transition-all shadow-sm"
+                >
+                  <Plus size={20} />
+                  <span>Add Song</span>
+                </button>
+              </div>
 
-            <LyricsModal 
-                isOpen={!!selectedSongLyrics} 
-                onClose={() => setSelectedSongLyrics(null)} 
-                song={selectedSongLyrics} 
-            />
+              {filteredSongs.length === 0 ? (
+                <div className="text-center py-20 bg-white rounded-3xl border border-dashed border-slate-300 shadow-sm">
+                  <div className="bg-slate-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <Search className="text-slate-400" size={24} />
+                  </div>
+                  <h3 className="text-lg font-semibold text-slate-800 mb-1">No songs found</h3>
+                  <p className="text-slate-500">Try adjusting your search or add a new song.</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {filteredSongs.map((song) => (
+                    <Card key={song.id} className="flex flex-col h-full hover:shadow-md transition-shadow group">
+                      <CardHeader className="pb-3 flex justify-between items-start flex-row">
+                        <div>
+                           <span className="inline-block px-2.5 py-1 bg-indigo-50 text-indigo-700 text-xs font-bold uppercase tracking-wider rounded-md mb-3">
+                            {song.genre}
+                          </span>
+                          <CardTitle className="line-clamp-1">{song.name}</CardTitle>
+                        </div>
+                      </CardHeader>
+                      <CardContent className="flex-grow">
+                        <div className="relative h-32 overflow-hidden rounded-xl bg-slate-50 border border-slate-100 p-4 group-hover:bg-indigo-50/30 transition-colors">
+                          <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-slate-50 group-hover:from-[rgb(244,246,255)] to-transparent pointer-events-none transition-colors"></div>
+                          <p className="text-sm font-mono text-slate-600 whitespace-pre-wrap leading-relaxed">
+                            {song.text || 'No lyrics/chords added.'}
+                          </p>
+                        </div>
+                        {song.lastPracticed && (
+                           <p className="text-xs font-medium text-slate-400 mt-4 flex items-center gap-1.5">
+                             <BookOpen size={14} /> Added: {song.lastPracticed}
+                           </p>
+                        )}
+                      </CardContent>
+                      
+                      <CardFooter className="justify-end gap-2 bg-white">
+                        <button 
+                          onClick={() => setPlaylistModal({ isOpen: true, songId: song.id })}
+                          className="p-2.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl transition-colors"
+                          title="Add to Playlist"
+                        >
+                          <ListPlus size={20} />
+                        </button>
+                        <button 
+                          onClick={() => handleEdit(song)}
+                          className="p-2.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"
+                          title="Edit Song"
+                        >
+                          <Edit2 size={20} />
+                        </button>
+                        <button 
+                          onClick={() => handleDelete(song.id)}
+                          className="p-2.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors"
+                          title="Delete Song"
+                        >
+                          <Trash2 size={20} />
+                        </button>
+                      </CardFooter>
+                    </Card>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
-    );
+      </main>
+    </div>
+  );
 }
