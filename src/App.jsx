@@ -1,4 +1,7 @@
 import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, addDoc, updateDoc, deleteDoc, onSnapshot, collection } from 'firebase/firestore';
 import { 
   Plus, 
   Search, 
@@ -54,21 +57,25 @@ const initialPlaylists = [
   { id: 102, name: 'Practice List', songIds: [3] }
 ];
 
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyAmkG9L75KSnFaSG0haIDMcVYQuYuP5mq0",
+  authDomain: "myrepertoiregithub.firebaseapp.com",
+  projectId: "myrepertoiregithub",
+  storageBucket: "myrepertoiregithub.firebasestorage.app",
+  messagingSenderId: "248740253880",
+  appId: "1:248740253880:web:0ee3562276e225fcae244d"
+};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
 export default function RepertoireApp() {
   // App State
-  const [songs, setSongs] = useState(() => {
-    try {
-      const saved = localStorage.getItem('repertoire-songs');
-      return saved ? JSON.parse(saved) : initialSongs;
-    } catch { return initialSongs; }
-  });
-  
-  const [playlists, setPlaylists] = useState(() => {
-    try {
-      const saved = localStorage.getItem('repertoire-playlists');
-      return saved ? JSON.parse(saved) : initialPlaylists;
-    } catch { return initialPlaylists; }
-  });
+  const [songs, setSongs] = useState([]);
+  const [playlists, setPlaylists] = useState([]);
+  const [user, setUser] = useState(null);
 
   const [view, setView] = useState('songs'); // 'songs' or 'playlists'
   
@@ -93,14 +100,46 @@ export default function RepertoireApp() {
   const [loginError, setLoginError] = useState('');
   const [viewingSong, setViewingSong] = useState(null);
 
-  // Save to LocalStorage
+  // Firebase Auth Setup
   useEffect(() => {
-    localStorage.setItem('repertoire-songs', JSON.stringify(songs));
-  }, [songs]);
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Auth error:", error);
+      }
+    };
+    initAuth();
+    
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
 
+  // Fetch Data from Firestore
   useEffect(() => {
-    localStorage.setItem('repertoire-playlists', JSON.stringify(playlists));
-  }, [playlists]);
+    if (!user) return;
+
+    const songsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'songs');
+    const unsubSongs = onSnapshot(songsRef, (snapshot) => {
+      const loadedSongs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setSongs(loadedSongs);
+    }, (error) => console.error("Error fetching songs:", error));
+
+    const playlistsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'playlists');
+    const unsubPlaylists = onSnapshot(playlistsRef, (snapshot) => {
+      const loadedPlaylists = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setPlaylists(loadedPlaylists);
+    }, (error) => console.error("Error fetching playlists:", error));
+
+    return () => {
+      unsubSongs();
+      unsubPlaylists();
+    };
+  }, [user]);
 
   // Song Handlers
   const handleAddNew = () => {
@@ -115,63 +154,91 @@ export default function RepertoireApp() {
     setFormData({ name: song.name, genre: song.genre, text: song.text });
   };
 
-  const handleDelete = (id) => {
-    setSongs(songs.filter(s => s.id !== id));
-    // Remove deleted song from all playlists
-    setPlaylists(playlists.map(p => ({
-      ...p,
-      songIds: p.songIds.filter(songId => songId !== id)
-    })));
+  const handleDelete = async (id) => {
+    if (!user) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'songs', id));
+      
+      // Remove deleted song from all playlists in DB
+      for (const p of playlists) {
+        if (p.songIds.includes(id)) {
+          const pRef = doc(db, 'artifacts', appId, 'users', user.uid, 'playlists', p.id);
+          await updateDoc(pRef, {
+            songIds: p.songIds.filter(songId => songId !== id)
+          });
+        }
+      }
+    } catch (err) {
+      console.error("Error deleting song:", err);
+    }
   };
 
-  const handleSaveSong = (e) => {
+  const handleSaveSong = async (e) => {
     e.preventDefault();
-    if (!formData.name.trim()) return;
+    if (!formData.name.trim() || !user) return;
 
-    if (editingSongId) {
-      setSongs(songs.map(s => s.id === editingSongId ? { ...s, ...formData } : s));
-    } else {
-      const newSong = {
-        ...formData,
-        id: Date.now(),
-        lastPracticed: new Date().toISOString().split('T')[0]
-      };
-      setSongs([newSong, ...songs]);
+    try {
+      if (editingSongId) {
+        const songRef = doc(db, 'artifacts', appId, 'users', user.uid, 'songs', editingSongId);
+        await updateDoc(songRef, formData);
+      } else {
+        const songsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'songs');
+        await addDoc(songsRef, {
+          ...formData,
+          lastPracticed: new Date().toISOString().split('T')[0]
+        });
+      }
+      setIsAddingMode(false);
+      setFormData({ name: '', genre: 'Pop', text: '' });
+    } catch (err) {
+      console.error("Error saving song:", err);
     }
-    setIsAddingMode(false);
-    setFormData({ name: '', genre: 'Pop', text: '' });
   };
 
   // Playlist Handlers
-  const handleCreatePlaylist = (e) => {
+  const handleCreatePlaylist = async (e) => {
     e.preventDefault();
-    if (!newPlaylistName.trim()) return;
-    const newPlaylist = {
-      id: Date.now(),
-      name: newPlaylistName,
-      songIds: []
-    };
-    setPlaylists([newPlaylist, ...playlists]);
-    setNewPlaylistName('');
-    setIsCreatingPlaylist(false);
+    if (!newPlaylistName.trim() || !user) return;
+    
+    try {
+      const playlistsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'playlists');
+      await addDoc(playlistsRef, {
+        name: newPlaylistName,
+        songIds: []
+      });
+      setNewPlaylistName('');
+      setIsCreatingPlaylist(false);
+    } catch (err) {
+      console.error("Error creating playlist:", err);
+    }
   };
 
-  const handleDeletePlaylist = (id) => {
-    setPlaylists(playlists.filter(p => p.id !== id));
-    if (activePlaylistId === id) setActivePlaylistId(null);
+  const handleDeletePlaylist = async (id) => {
+    if (!user) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'playlists', id));
+      if (activePlaylistId === id) setActivePlaylistId(null);
+    } catch (err) {
+      console.error("Error deleting playlist:", err);
+    }
   };
 
-  const toggleSongInPlaylist = (playlistId, songId) => {
-    setPlaylists(playlists.map(p => {
-      if (p.id === playlistId) {
-        const hasSong = p.songIds.includes(songId);
-        return {
-          ...p,
-          songIds: hasSong ? p.songIds.filter(id => id !== songId) : [...p.songIds, songId]
-        };
-      }
-      return p;
-    }));
+  const toggleSongInPlaylist = async (playlistId, songId) => {
+    if (!user) return;
+    const p = playlists.find(p => p.id === playlistId);
+    if (!p) return;
+    
+    try {
+      const hasSong = p.songIds.includes(songId);
+      const newSongIds = hasSong 
+        ? p.songIds.filter(id => id !== songId) 
+        : [...p.songIds, songId];
+        
+      const pRef = doc(db, 'artifacts', appId, 'users', user.uid, 'playlists', playlistId);
+      await updateDoc(pRef, { songIds: newSongIds });
+    } catch (err) {
+      console.error("Error toggling song in playlist:", err);
+    }
   };
 
   // Filtered Data
