@@ -1,63 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { initializeApp } from 'firebase/app';
+import React, { useState, useEffect, useRef } from 'react';
+import { Search, Music, Plus, ListMusic, X, Edit2, Trash2, Play, ChevronRight, ChevronDown, Check, Lock, ChevronLeft } from 'lucide-react';
+import { initializeApp } from "firebase/app";
+import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot } from 'firebase/firestore';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, addDoc, updateDoc, deleteDoc, onSnapshot, collection } from 'firebase/firestore';
-import { 
-  Plus, 
-  Search, 
-  Filter, 
-  Trash2, 
-  Edit2, 
-  X, 
-  Save, 
-  BookOpen,
-  Mic2,
-  ListMusic,
-  ListPlus,
-  ArrowLeft,
-  CheckCircle2,
-  PlaySquare,
-  User,
-  Lock,
-  LogOut,
-  ChevronLeft,
-  ChevronRight
-} from 'lucide-react';
-
-// Inline UI Components to ensure the preview works without external UI libraries
-const Card = ({ children, className = '', onClick }) => (
-  <div onClick={onClick} className={`bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden ${className}`}>
-    {children}
-  </div>
-);
-const CardHeader = ({ children, className = '' }) => (
-  <div className={`p-6 pb-3 ${className}`}>{children}</div>
-);
-const CardTitle = ({ children, className = '' }) => (
-  <h3 className={`text-xl font-bold text-slate-800 ${className}`}>{children}</h3>
-);
-const CardContent = ({ children, className = '' }) => (
-  <div className={`px-6 pb-4 flex-grow ${className}`}>{children}</div>
-);
-const CardFooter = ({ children, className = '' }) => (
-  <div className={`px-6 py-4 bg-slate-50 border-t border-slate-100 flex items-center ${className}`}>{children}</div>
-);
-
-const GENRES = [
-  'Pop', 'Rock', 'Folk', 'Acoustic Rock', 'Folk Pop', 
-  'Blues', 'Jazz', 'Classical', 'Country', 'R&B', 'Other'
-];
-
-const initialSongs = [
-  { id: 1, name: 'Wonderwall', genre: 'Acoustic Rock', text: 'Today is gonna be the day\nThat they\'re gonna throw it back to you\nBy now you should\'ve somehow\nRealized what you gotta do', lastPracticed: '2023-10-10' },
-  { id: 2, name: 'Fast Car', genre: 'Folk Pop', text: 'You got a fast car\nI want a ticket to anywhere\nMaybe we make a deal\nMaybe together we can get somewhere', lastPracticed: '2023-10-12' },
-  { id: 3, name: 'Hallelujah', genre: 'Folk', text: 'I\'ve heard there was a secret chord\nThat David played, and it pleased the Lord\nBut you don\'t really care for music, do you?', lastPracticed: '2023-10-05' },
-];
-
-const initialPlaylists = [
-  { id: 101, name: 'Coffee Shop Gig', songIds: [1, 2] },
-  { id: 102, name: 'Practice List', songIds: [3] }
-];
 
 // Your web app's Firebase configuration
 const firebaseConfig = {
@@ -68,813 +13,769 @@ const firebaseConfig = {
   messagingSenderId: "248740253880",
   appId: "1:248740253880:web:0ee3562276e225fcae244d"
 };
+
+// Initialize Firebase
 const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const auth = getAuth(app);
+
+const GENRES = ['Pop', 'Rock', 'Jazz', 'Classical', 'Folk', 'R&B', 'Country', 'Other'];
 
 export default function RepertoireApp() {
-  // App State
-  const [songs, setSongs] = useState([]);
-  const [playlists, setPlaylists] = useState([]);
+  // Authentication State
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [passwordInput, setPasswordInput] = useState('');
   const [user, setUser] = useState(null);
 
-  const [view, setView] = useState('songs'); // 'songs' or 'playlists'
+  // Core Data State
+  const [songs, setSongs] = useState([]);
+  const [playlists, setPlaylists] = useState([]);
   
-  // Song List State
-  const [searchTerm, setSearchTerm] = useState('');
+  // UI View State
+  const [activeTab, setActiveTab] = useState('library');
+  const [searchQuery, setSearchQuery] = useState('');
   const [selectedGenre, setSelectedGenre] = useState('All');
   
-  // Song Form State
+  // Form State
   const [isAddingMode, setIsAddingMode] = useState(false);
   const [editingSongId, setEditingSongId] = useState(null);
   const [formData, setFormData] = useState({ name: '', genre: 'Pop', text: '' });
-  
   const [formError, setFormError] = useState('');
-  const [isSaving, setIsSaving] = useState(false);
+  const textareaRef = useRef(null);
 
-  // Playlist State
-  const [activePlaylistId, setActivePlaylistId] = useState(null);
-  const [playlistModal, setPlaylistModal] = useState({ isOpen: false, songId: null });
-  const [selectedPlaylistIds, setSelectedPlaylistIds] = useState(new Set());
-  const [newPlaylistName, setNewPlaylistName] = useState('');
-  const [isCreatingPlaylist, setIsCreatingPlaylist] = useState(false);
-
-  // Auth & View State
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [loginPassword, setLoginPassword] = useState('');
-  const [loginError, setLoginError] = useState('');
+  // Viewer State
   const [viewingSong, setViewingSong] = useState(null);
 
-  // Firebase Auth Setup
+  // Playlist Management State
+  const [newPlaylistName, setNewPlaylistName] = useState('');
+  const [expandedPlaylistId, setExpandedPlaylistId] = useState(null);
+  const [isPlaylistModalOpen, setIsPlaylistModalOpen] = useState(false);
+  const [playlistModalSongId, setPlaylistModalSongId] = useState(null);
+  const [selectedPlaylistIds, setSelectedPlaylistIds] = useState([]);
+
+  // 1. Initialize Authentication Correctly on Load
   useEffect(() => {
     const initAuth = async () => {
       try {
+        // Platform specific token handshake or fallback to anonymous auth
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
+          try {
+            await signInWithCustomToken(auth, __initial_auth_token);
+          } catch (e) {
+            await signInAnonymously(auth);
+          }
         } else {
           await signInAnonymously(auth);
         }
       } catch (error) {
-        console.error("Auth error:", error);
+        console.error("Firebase auth initialization error:", error);
       }
     };
+    
     initAuth();
     
-    const unsubscribe = onAuthStateChanged(auth, setUser);
+    // Track when the user session is officially ready
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+    
     return () => unsubscribe();
   }, []);
 
-  // Fetch Data from Firestore
+  // 2. Fetch Data only when Authenticated & Unlocked
   useEffect(() => {
-    if (!user) return;
+    if (!user || !isAuthenticated) return;
 
-    const songsRef = collection(db, 'artifacts', appId, 'public', 'data', 'songs');
+    // Listen to shared public data folder
+    const songsRef = collection(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'songs');
+    const playlistsRef = collection(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'playlists');
+
     const unsubSongs = onSnapshot(songsRef, (snapshot) => {
-      const loadedSongs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setSongs(loadedSongs);
-    }, (error) => console.error("Error fetching songs:", error));
+      const songsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setSongs(songsData);
+    }, (error) => {
+      console.error("Error fetching songs:", error);
+    });
 
-    const playlistsRef = collection(db, 'artifacts', appId, 'public', 'data', 'playlists');
     const unsubPlaylists = onSnapshot(playlistsRef, (snapshot) => {
-      const loadedPlaylists = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setPlaylists(loadedPlaylists);
-    }, (error) => console.error("Error fetching playlists:", error));
+      const playlistsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setPlaylists(playlistsData);
+    }, (error) => {
+      console.error("Error fetching playlists:", error);
+    });
 
     return () => {
       unsubSongs();
       unsubPlaylists();
     };
-  }, [user]);
+  }, [isAuthenticated, user]);
 
-  // Song Handlers
+  const handleLogin = (e) => {
+    e.preventDefault();
+    if (passwordInput === 'myrepertoire') { // Simple password for shared app
+      setIsAuthenticated(true);
+    } else {
+      alert("Incorrect password");
+    }
+  };
+
+  const insertChord = (chord) => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+        setFormData({...formData, text: (formData.text || '') + `[${chord}]`});
+        return;
+    }
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const text = formData.text || '';
+    const before = text.substring(0, start);
+    const after = text.substring(end, text.length);
+    const newText = before + `[${chord}]` + after;
+    
+    setFormData({ ...formData, text: newText });
+    
+    // Tiny timeout ensures React state updates before we move the cursor
+    setTimeout(() => {
+      textarea.setSelectionRange(start + chord.length + 2, start + chord.length + 2);
+      textarea.focus();
+    }, 10);
+  };
+
   const handleAddNew = () => {
-    setIsAddingMode(true);
-    setEditingSongId(null);
-    setFormData({ name: '', genre: 'Pop', text: '' });
     setFormError('');
+    setFormData({ name: '', genre: 'Pop', text: '' });
+    setEditingSongId(null);
+    setIsAddingMode(true);
   };
 
   const handleEdit = (song) => {
-    setIsAddingMode(true);
+    setFormError('');
+    setFormData({ name: song.name, genre: song.genre, text: song.text || '' });
     setEditingSongId(song.id);
-    setFormData({ name: song.name, genre: song.genre, text: song.text });
-    setFormError('');
+    setIsAddingMode(true);
   };
 
-  const handleDelete = async (id) => {
-    if (!user) return;
-    try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'songs', id));
-      
-      // Remove deleted song from all playlists in DB
-      for (const p of playlists) {
-        if (p.songIds.includes(id)) {
-          const pRef = doc(db, 'artifacts', appId, 'public', 'data', 'playlists', p.id);
-          await updateDoc(pRef, {
-            songIds: p.songIds.filter(songId => songId !== id)
-          });
-        }
-      }
-    } catch (err) {
-      console.error("Error deleting song:", err);
-    }
-  };
-
-  const handleSaveSong = async (e) => {
-    e.preventDefault();
-    setFormError('');
-
-    if (!formData.name.trim()) {
-      setFormError('Song title is required.');
-      return;
-    }
-
+  const handleSaveSong = async () => {
     if (!user) {
-      setFormError('Not connected to Firebase. Please enable "Anonymous Sign-in" in your Firebase Auth settings.');
+      setFormError('Connecting to database... Please wait a moment and try again.');
       return;
     }
+    if (!formData.name.trim()) {
+      setFormError('Song name is required.');
+      return;
+    }
+    
+    setFormError(''); // Clear errors before trying
+    const songsRef = collection(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'songs');
 
-    setIsSaving(true);
     try {
       if (editingSongId) {
-        const songRef = doc(db, 'artifacts', appId, 'public', 'data', 'songs', editingSongId);
-        await updateDoc(songRef, formData);
+        await updateDoc(doc(songsRef, editingSongId), formData);
       } else {
-        const songsRef = collection(db, 'artifacts', appId, 'public', 'data', 'songs');
-        await addDoc(songsRef, {
-          ...formData,
-          lastPracticed: new Date().toISOString().split('T')[0]
-        });
+        await addDoc(songsRef, formData);
       }
       
-      // Successfully saved! Close the popup and reset all form state
+      // Reset and close on success
       setIsAddingMode(false);
-      setEditingSongId(null);
       setFormData({ name: '', genre: 'Pop', text: '' });
-      
-    } catch (err) {
-      console.error("Error saving song:", err);
-      setFormError(
-        err.message.includes("permission") 
-          ? "Permission Denied: You need to update your Firestore Database Rules to allow writes." 
-          : `Error: ${err.message}`
-      );
-    } finally {
-      setIsSaving(false);
+      setEditingSongId(null);
+    } catch (error) {
+      console.error("Error saving song:", error);
+      if (error.code === 'permission-denied') {
+        setFormError("Permission Denied: You need to update your Firestore Database Rules to allow writes.");
+      } else {
+        setFormError(`Error: ${error.message}`);
+      }
     }
   };
 
-  // Playlist Handlers
-  const handleCreatePlaylist = async (e) => {
-    e.preventDefault();
-    if (!newPlaylistName.trim() || !user) return;
-    
+  const handleDeleteSong = async (id) => {
+    if (confirm("Are you sure you want to delete this song?")) {
+      try {
+        await deleteDoc(doc(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'songs', id));
+        // Remove from any playlists it might be in
+        playlists.forEach(async (playlist) => {
+          if (playlist.songIds?.includes(id)) {
+            const newSongIds = playlist.songIds.filter(songId => songId !== id);
+            await updateDoc(doc(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'playlists', playlist.id), { songIds: newSongIds });
+          }
+        });
+      } catch (error) {
+        console.error("Error deleting song:", error);
+        alert("Failed to delete song. Check your database rules.");
+      }
+    }
+  };
+
+  const handleCreatePlaylist = async () => {
+    if (!newPlaylistName.trim()) return;
     try {
-      const playlistsRef = collection(db, 'artifacts', appId, 'public', 'data', 'playlists');
+      const playlistsRef = collection(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'playlists');
       await addDoc(playlistsRef, {
         name: newPlaylistName,
         songIds: []
       });
       setNewPlaylistName('');
-      setIsCreatingPlaylist(false);
-    } catch (err) {
-      console.error("Error creating playlist:", err);
+    } catch (error) {
+       console.error("Error creating playlist:", error);
+       alert("Failed to create playlist. Check database rules.");
     }
   };
 
   const handleDeletePlaylist = async (id) => {
-    if (!user) return;
-    try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'playlists', id));
-      if (activePlaylistId === id) setActivePlaylistId(null);
-    } catch (err) {
-      console.error("Error deleting playlist:", err);
+    if (confirm("Delete this playlist? (Songs will remain in your library)")) {
+       try {
+         await deleteDoc(doc(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'playlists', id));
+       } catch (error) {
+          console.error("Error deleting playlist:", error);
+       }
     }
   };
 
-  const toggleSongInPlaylist = async (playlistId, songId) => {
-    if (!user) return;
-    const p = playlists.find(p => p.id === playlistId);
-    if (!p) return;
-    
+  const openPlaylistModal = (songId) => {
+    setPlaylistModalSongId(songId);
+    // Pre-select playlists this song is already in
+    const activeIds = playlists.filter(p => p.songIds?.includes(songId)).map(p => p.id);
+    setSelectedPlaylistIds(activeIds);
+    setIsPlaylistModalOpen(true);
+  };
+
+  const togglePlaylistSelection = (playlistId) => {
+    setSelectedPlaylistIds(prev => 
+      prev.includes(playlistId) 
+        ? prev.filter(id => id !== playlistId)
+        : [...prev, playlistId]
+    );
+  };
+
+  const savePlaylistSelection = async () => {
     try {
-      const hasSong = p.songIds.includes(songId);
-      const newSongIds = hasSong 
-        ? p.songIds.filter(id => id !== songId) 
-        : [...p.songIds, songId];
+      for (const playlist of playlists) {
+        const isSelected = selectedPlaylistIds.includes(playlist.id);
+        const hasSong = playlist.songIds?.includes(playlistModalSongId);
         
-      const pRef = doc(db, 'artifacts', appId, 'public', 'data', 'playlists', playlistId);
-      await updateDoc(pRef, { songIds: newSongIds });
-    } catch (err) {
-      console.error("Error toggling song in playlist:", err);
-    }
-  };
+        let newSongIds = [...(playlist.songIds || [])];
+        let needsUpdate = false;
 
-  const handleConfirmPlaylists = async () => {
-    if (!user || !playlistModal.songId) return;
-    const songId = playlistModal.songId;
-
-    try {
-      const updatePromises = playlists.map(async (playlist) => {
-        const hasSongCurrently = playlist.songIds.includes(songId);
-        const shouldHaveSong = selectedPlaylistIds.has(playlist.id);
-
-        if (hasSongCurrently && !shouldHaveSong) {
-          // Remove song from playlist
-          const pRef = doc(db, 'artifacts', appId, 'public', 'data', 'playlists', playlist.id);
-          await updateDoc(pRef, { songIds: playlist.songIds.filter(id => id !== songId) });
-        } else if (!hasSongCurrently && shouldHaveSong) {
-          // Add song to playlist
-          const pRef = doc(db, 'artifacts', appId, 'public', 'data', 'playlists', playlist.id);
-          await updateDoc(pRef, { songIds: [...playlist.songIds, songId] });
+        if (isSelected && !hasSong) {
+          newSongIds.push(playlistModalSongId);
+          needsUpdate = true;
+        } else if (!isSelected && hasSong) {
+          newSongIds = newSongIds.filter(id => id !== playlistModalSongId);
+          needsUpdate = true;
         }
-      });
 
-      await Promise.all(updatePromises);
-    } catch (err) {
-      console.error("Error updating playlists:", err);
-    } finally {
-      setPlaylistModal({ isOpen: false, songId: null });
-      setSelectedPlaylistIds(new Set());
+        if (needsUpdate) {
+           await updateDoc(doc(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'playlists', playlist.id), { songIds: newSongIds });
+        }
+      }
+      closePlaylistModal();
+    } catch (error) {
+      console.error("Error saving to playlists:", error);
+      alert("Failed to update playlists.");
     }
   };
 
-  // Filtered Data
+  const closePlaylistModal = () => {
+    setIsPlaylistModalOpen(false);
+    setPlaylistModalSongId(null);
+    setSelectedPlaylistIds([]);
+  };
+
   const filteredSongs = songs.filter(song => {
-    const matchesSearch = song.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                          (song.text && song.text.toLowerCase().includes(searchTerm.toLowerCase()));
+    const matchesSearch = song.name.toLowerCase().includes(searchQuery.toLowerCase());
     const matchesGenre = selectedGenre === 'All' || song.genre === selectedGenre;
     return matchesSearch && matchesGenre;
   });
 
-  const playlistSongs = playlistModal.isOpen && playlistModal.songId 
-    ? songs.filter(s => s.id !== playlistModal.songId) // In a real app this might be different logic, but adding a safe default here
-    : [];
+  const currentContextIds = expandedPlaylistId 
+    ? playlists.find(p => p.id === expandedPlaylistId)?.songIds || []
+    : filteredSongs.map(s => s.id);
 
-  const activePlaylist = activePlaylistId ? playlists.find(p => p.id === activePlaylistId) : null;
-
-  // Viewing Context for Navigation
-  let currentContextIds = [];
-  if (view === 'playlists' && activePlaylist) {
-    currentContextIds = activePlaylist.songIds;
-  } else if (view === 'songs') {
-    currentContextIds = filteredSongs.map(s => s.id);
-  }
-  
   const currentSongIndex = viewingSong ? currentContextIds.indexOf(viewingSong.id) : -1;
-  const hasPrev = currentSongIndex > 0;
-  const hasNext = currentSongIndex !== -1 && currentSongIndex < currentContextIds.length - 1;
 
-  const navigateToSong = (direction) => {
-    if (currentSongIndex === -1) return;
-    const nextId = currentContextIds[currentSongIndex + direction];
-    const nextSong = songs.find(s => s.id === nextId);
-    if (nextSong) setViewingSong(nextSong);
+  const handlePrevSong = () => {
+    if (currentSongIndex > 0) {
+      const prevId = currentContextIds[currentSongIndex - 1];
+      const prevSong = songs.find(s => s.id === prevId);
+      if (prevSong) setViewingSong(prevSong);
+    }
   };
 
-  if (!isLoggedIn) {
+  const handleNextSong = () => {
+    if (currentSongIndex < currentContextIds.length - 1 && currentSongIndex !== -1) {
+      const nextId = currentContextIds[currentSongIndex + 1];
+      const nextSong = songs.find(s => s.id === nextId);
+      if (nextSong) setViewingSong(nextSong);
+    }
+  };
+
+  if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4 font-sans">
-        <Card className="w-full max-w-md shadow-xl border-indigo-100">
-          <form onSubmit={(e) => {
-            e.preventDefault();
-            // Simple client-side lock. You can change this validation logic as needed.
-            if (loginPassword.length >= 4) {
-              setIsLoggedIn(true);
-              setLoginError('');
-            } else {
-              setLoginError('Password must be at least 4 characters.');
-            }
-          }}>
-            <CardHeader className="text-center pb-2 pt-8">
-              <div className="bg-indigo-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-indigo-600 shadow-inner">
-                <Lock size={32} />
-              </div>
-              <CardTitle className="text-2xl text-slate-800">App Locked</CardTitle>
-              <p className="text-slate-500 text-sm mt-2">Enter a password to access your repertoire.</p>
-            </CardHeader>
-            <CardContent className="pt-4 pb-8 space-y-4">
-              <div>
-                <input
-                  type="password"
-                  value={loginPassword}
-                  onChange={(e) => setLoginPassword(e.target.value)}
-                  placeholder="Enter password..."
-                  className="w-full p-4 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-center text-lg tracking-widest bg-slate-50"
-                  autoFocus
-                />
-                {loginError && <p className="text-red-500 text-sm mt-2 text-center font-medium">{loginError}</p>}
-              </div>
-              <button
-                type="submit"
-                className="w-full py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-semibold transition-all shadow-md flex justify-center items-center gap-2 text-lg"
-              >
-                <User size={20} /> Unlock
-              </button>
-            </CardContent>
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="bg-white max-w-md w-full rounded-2xl shadow-xl p-8 border border-slate-100 text-center">
+          <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-6 text-indigo-600">
+            <Lock size={32} />
+          </div>
+          <h1 className="text-2xl font-bold text-slate-800 mb-2">My Repertoire</h1>
+          <p className="text-slate-500 mb-8">Enter the password to access the shared collection.</p>
+          <form onSubmit={handleLogin} className="space-y-4">
+            <input
+              type="password"
+              value={passwordInput}
+              onChange={(e) => setPasswordInput(e.target.value)}
+              placeholder="Password..."
+              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50 text-center text-lg tracking-widest"
+            />
+            <button
+              type="submit"
+              className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl shadow-md shadow-indigo-200 transition-colors"
+            >
+              Unlock
+            </button>
           </form>
-        </Card>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
+    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans selection:bg-indigo-100 selection:text-indigo-900">
+      
       {/* Header */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm">
-        <div className="max-w-5xl mx-auto px-4 py-4 flex flex-col sm:flex-row justify-between items-center gap-4">
-          <div className="flex items-center gap-3">
-            <div className="bg-indigo-600 p-2.5 rounded-xl text-white shadow-md">
-              <Mic2 size={24} />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold text-slate-800 tracking-tight leading-tight">Repertoire</h1>
-              <p className="text-xs text-slate-500 font-medium">{songs.length} tracks ready to play</p>
-            </div>
+        <div className="max-w-5xl mx-auto px-4 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-center gap-2 text-indigo-600">
+            <Music size={28} className="drop-shadow-sm" />
+            <h1 className="text-2xl font-extrabold tracking-tight">Repertoire</h1>
           </div>
           
-          <div className="flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto">
-        <div className="flex bg-slate-100 p-1 rounded-xl w-full sm:w-auto border border-slate-200">
-          <button
-            onClick={() => { setView('songs'); setActivePlaylistId(null); }}
-            className={`flex-1 sm:px-6 py-2 rounded-lg text-sm font-semibold transition-all ${view === 'songs' ? 'bg-white shadow-sm text-indigo-700' : 'text-slate-500 hover:text-slate-700'}`}
-          >
-            Library
-          </button>
-          <button
-            onClick={() => setView('playlists')}
-            className={`flex-1 sm:px-6 py-2 rounded-lg text-sm font-semibold transition-all flex items-center justify-center gap-2 ${view === 'playlists' ? 'bg-white shadow-sm text-indigo-700' : 'text-slate-500 hover:text-slate-700'}`}
-          >
-            <ListMusic size={16} />
-            Playlists
-          </button>
+          <div className="flex items-center bg-slate-100 p-1 rounded-xl">
+            <button 
+              onClick={() => setActiveTab('library')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === 'library' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+            >
+              <Music size={16} /> Library
+            </button>
+            <button 
+              onClick={() => { setActiveTab('playlists'); setExpandedPlaylistId(null); }}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === 'playlists' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+            >
+              <ListMusic size={16} /> Playlists
+            </button>
+          </div>
         </div>
-        <button
-          onClick={() => { setIsLoggedIn(false); setLoginPassword(''); }}
-          className="p-2.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-xl transition-colors shadow-sm bg-white border border-slate-200 sm:border-none sm:bg-transparent sm:shadow-none"
-          title="Lock App"
-        >
-          <LogOut size={20} />
-        </button>
-      </div>
-    </div>
-  </header>
+      </header>
 
-      <main className="max-w-5xl mx-auto px-4 py-8 relative">
+      {/* Main Content Area */}
+      <main className="max-w-5xl mx-auto px-4 py-8">
         
-        {viewingSong && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
-              <div className="flex justify-between items-center p-5 border-b border-slate-100 bg-slate-50">
-                <div>
-                  <h2 className="text-2xl font-bold text-slate-800">{viewingSong.name}</h2>
-                  <span className="inline-block mt-2 px-3 py-1 bg-indigo-100 text-indigo-700 text-xs font-bold uppercase tracking-wider rounded-md">
-                    {viewingSong.genre}
-                  </span>
+        {/* Top Controls (Search, Filter, Add) - Only visible in Library tab */}
+        {activeTab === 'library' && (
+          <div className="flex flex-col sm:flex-row gap-4 mb-8">
+            <div className="relative flex-grow">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
+              <input 
+                type="text" 
+                placeholder="Search songs..." 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-10 pr-4 py-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm transition-shadow"
+              />
+            </div>
+            <div className="flex gap-2">
+              <select 
+                value={selectedGenre}
+                onChange={(e) => setSelectedGenre(e.target.value)}
+                className="bg-white border border-slate-200 py-3 px-4 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium text-slate-700 shadow-sm cursor-pointer"
+              >
+                <option value="All">All Genres</option>
+                {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
+              </select>
+              <button 
+                onClick={handleAddNew}
+                className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white py-3 px-6 rounded-xl font-bold transition-all shadow-md shadow-indigo-200 active:scale-95 whitespace-nowrap"
+              >
+                <Plus size={20} /> <span className="hidden sm:inline">New Song</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Library View */}
+        {activeTab === 'library' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {filteredSongs.length === 0 ? (
+              <div className="col-span-full py-12 text-center text-slate-500">
+                <Music size={48} className="mx-auto mb-4 opacity-20" />
+                <p className="text-lg">No songs found.</p>
+              </div>
+            ) : (
+              filteredSongs.map(song => (
+                <div key={song.id} className="bg-white border border-slate-200 rounded-2xl p-5 hover:border-indigo-300 hover:shadow-lg transition-all group relative overflow-hidden flex flex-col h-full">
+                  <div className="flex justify-between items-start mb-2">
+                    <h3 className="text-xl font-bold text-slate-800 pr-4 leading-tight">{song.name}</h3>
+                    <span className="px-2.5 py-1 bg-slate-100 text-slate-600 text-xs font-bold uppercase tracking-wider rounded-md border border-slate-200">
+                      {song.genre}
+                    </span>
+                  </div>
+                  
+                  <div className="flex-grow mt-2 relative">
+                    <p className="text-sm text-slate-500 font-mono line-clamp-3 whitespace-pre-wrap">{song.text || "No lyrics added."}</p>
+                    <div className="absolute inset-0 bg-gradient-to-t from-white to-transparent pointer-events-none"></div>
+                  </div>
+                  
+                  <div className="mt-4 pt-4 border-t border-slate-100 flex items-center justify-between gap-2">
+                    <button 
+                      onClick={() => { setViewingSong(song); setExpandedPlaylistId(null); }}
+                      className="flex items-center justify-center gap-1.5 flex-grow bg-indigo-50 hover:bg-indigo-100 text-indigo-700 py-2 rounded-lg font-semibold text-sm transition-colors"
+                    >
+                      <Play size={16} /> View
+                    </button>
+                    <div className="flex gap-1">
+                      <button onClick={() => openPlaylistModal(song.id)} className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="Add to Playlist">
+                        <ListMusic size={18} />
+                      </button>
+                      <button onClick={() => handleEdit(song)} className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors" title="Edit">
+                        <Edit2 size={18} />
+                      </button>
+                      <button onClick={() => handleDeleteSong(song.id)} className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="Delete">
+                        <Trash2 size={18} />
+                      </button>
+                    </div>
+                  </div>
                 </div>
-                <button onClick={() => setViewingSong(null)} className="text-slate-400 hover:text-slate-700 p-2 rounded-full hover:bg-slate-200 transition-colors">
-                  <X size={28} />
+              ))
+            )}
+          </div>
+        )}
+
+        {/* Playlists View */}
+        {activeTab === 'playlists' && (
+          <div className="max-w-3xl mx-auto">
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm mb-6">
+              <h2 className="text-lg font-bold text-slate-800 mb-4">Create New Playlist</h2>
+              <div className="flex gap-3">
+                <input 
+                  type="text" 
+                  placeholder="Playlist Name..." 
+                  value={newPlaylistName}
+                  onChange={(e) => setNewPlaylistName(e.target.value)}
+                  className="flex-grow px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <button 
+                  onClick={handleCreatePlaylist}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-xl font-bold transition-colors shadow-md shadow-indigo-200"
+                >
+                  Create
                 </button>
               </div>
-              <div className="p-6 overflow-y-auto flex-grow bg-white">
-                <pre className="font-mono text-slate-700 whitespace-pre-wrap leading-relaxed text-sm sm:text-base">
-                  {viewingSong.text || 'No lyrics/chords added.'}
-                </pre>
-              </div>
-              {currentContextIds.length > 1 && (
-                <div className="flex justify-between items-center p-4 border-t border-slate-100 bg-slate-50">
-                  <button 
-                    onClick={() => navigateToSong(-1)} 
-                    disabled={!hasPrev}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors ${hasPrev ? 'text-indigo-700 hover:bg-indigo-50' : 'text-slate-300 cursor-not-allowed'}`}
-                  >
-                    <ChevronLeft size={20} /> Previous
-                  </button>
-                  <span className="text-sm font-medium text-slate-500">
-                    Song {currentSongIndex + 1} of {currentContextIds.length}
-                  </span>
-                  <button 
-                    onClick={() => navigateToSong(1)} 
-                    disabled={!hasNext}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors ${hasNext ? 'text-indigo-700 hover:bg-indigo-50' : 'text-slate-300 cursor-not-allowed'}`}
-                  >
-                    Next <ChevronRight size={20} />
-                  </button>
+            </div>
+
+            <div className="space-y-4">
+              {playlists.length === 0 ? (
+                <div className="text-center py-12 text-slate-500">
+                  <ListMusic size={48} className="mx-auto mb-4 opacity-20" />
+                  <p>You haven't created any playlists yet.</p>
                 </div>
+              ) : (
+                playlists.map(playlist => {
+                  const isExpanded = expandedPlaylistId === playlist.id;
+                  const playlistSongs = (playlist.songIds || []).map(id => songs.find(s => s.id === id)).filter(Boolean);
+
+                  return (
+                    <div key={playlist.id} className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-shadow">
+                      <div 
+                        className="p-5 flex items-center justify-between cursor-pointer hover:bg-slate-50 transition-colors"
+                        onClick={() => setExpandedPlaylistId(isExpanded ? null : playlist.id)}
+                      >
+                        <div className="flex items-center gap-4">
+                          <div className={`p-2 rounded-lg ${isExpanded ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>
+                            {isExpanded ? <ChevronDown size={24} /> : <ChevronRight size={24} />}
+                          </div>
+                          <div>
+                            <h3 className="text-xl font-bold text-slate-800">{playlist.name}</h3>
+                            <p className="text-sm text-slate-500 font-medium">{playlistSongs.length} songs</p>
+                          </div>
+                        </div>
+                        <button 
+                          onClick={(e) => { e.stopPropagation(); handleDeletePlaylist(playlist.id); }}
+                          className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                        >
+                          <Trash2 size={20} />
+                        </button>
+                      </div>
+
+                      {isExpanded && (
+                        <div className="border-t border-slate-100 bg-slate-50 p-4">
+                          {playlistSongs.length === 0 ? (
+                            <p className="text-center text-sm text-slate-500 py-4 italic">No songs in this playlist yet.</p>
+                          ) : (
+                            <div className="space-y-2">
+                              {playlistSongs.map((song, idx) => (
+                                <div key={song.id} className="bg-white border border-slate-200 p-3 rounded-xl flex items-center justify-between hover:border-indigo-300 transition-colors">
+                                  <div className="flex items-center gap-3">
+                                    <span className="text-slate-400 font-mono text-sm w-6 text-right">{idx + 1}.</span>
+                                    <div>
+                                      <p className="font-bold text-slate-800">{song.name}</p>
+                                      <p className="text-xs text-slate-500 uppercase font-bold tracking-wider">{song.genre}</p>
+                                    </div>
+                                  </div>
+                                  <button 
+                                    onClick={() => setViewingSong(song)}
+                                    className="px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-sm font-semibold rounded-lg transition-colors"
+                                  >
+                                    View
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
               )}
             </div>
           </div>
         )}
+      </main>
 
-        {playlistModal.isOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-200">
-            <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm overflow-hidden flex flex-col max-h-[80vh]">
-              <div className="flex justify-between items-center p-4 border-b border-slate-100 bg-slate-50">
-                <h3 className="font-semibold text-slate-800">Add to Playlist</h3>
-                <button onClick={() => setPlaylistModal({ isOpen: false, songId: null })} className="text-slate-400 hover:text-slate-700 p-1.5 rounded-full hover:bg-slate-200 transition-colors">
-                  <X size={20} />
+      {}
+      {isAddingMode && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto border border-slate-200">
+            <div className="p-6">
+              <div className="flex justify-between items-center mb-6">
+                <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
+                  {editingSongId ? <Edit2 className="text-indigo-600" /> : <Plus className="text-indigo-600" />}
+                  {editingSongId ? 'Edit Song' : 'Add New Song'}
+                </h2>
+                <button onClick={() => setIsAddingMode(false)} className="text-slate-400 hover:text-slate-700 p-2 rounded-full hover:bg-slate-100 transition-colors">
+                  <X size={24} />
                 </button>
               </div>
-              <div className="p-2 overflow-y-auto flex-grow">
-                {playlists.length === 0 ? (
-                  <p className="text-sm text-slate-500 text-center p-6">No playlists yet. Create one in the Playlists tab!</p>
-                ) : (
-                  <div className="flex flex-col gap-1 p-2">
-                    {playlists.map((playlist) => {
-                      const isSelected = selectedPlaylistIds.has(playlist.id);
-                      return (
-                        <button
-                          key={playlist.id}
-                          onClick={() => {
-                            const newSelected = new Set(selectedPlaylistIds);
-                            if (isSelected) newSelected.delete(playlist.id);
-                            else newSelected.add(playlist.id);
-                            setSelectedPlaylistIds(newSelected);
-                          }}
-                          className="w-full text-left p-3 rounded-lg flex items-center justify-between hover:bg-slate-50 transition-colors border border-transparent hover:border-slate-100"
-                        >
-                          <span className="font-medium text-slate-700">{playlist.name}</span>
-                          {isSelected ? (
-                            <CheckCircle2 size={20} className="text-emerald-500" />
-                          ) : (
-                            <div className="w-5 h-5 rounded-full border-2 border-slate-300" />
-                          )}
-                        </button>
-                      );
-                    })}
+
+              {formError && (
+                <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm font-medium flex items-start gap-2">
+                  <span>⚠️</span> {formError}
+                </div>
+              )}
+
+              <div className="space-y-5">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
+                  <div className="sm:col-span-2">
+                    <label className="block text-sm font-semibold text-slate-700 mb-1.5">Song Name</label>
+                    <input 
+                      type="text" 
+                      value={formData.name}
+                      onChange={(e) => setFormData({...formData, name: e.target.value})}
+                      className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none bg-slate-50"
+                      placeholder="e.g. Wonderwall"
+                    />
                   </div>
-                )}
-              </div>
-              <div className="p-4 border-t border-slate-100 bg-slate-50 flex gap-2">
-                <button
-                  onClick={() => setPlaylistModal({ isOpen: false, songId: null })}
-                  className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl font-medium transition-colors text-sm"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleConfirmPlaylists}
-                  className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-medium transition-colors text-sm"
-                >
-                  OK
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {view === 'songs' ? (
-          <>
-            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
-              <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-                <ListMusic className="text-indigo-600" size={24} /> 
-                My Library
-              </h2>
-              <button 
-                onClick={handleAddNew}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-xl font-semibold transition-all shadow-md hover:shadow-lg flex items-center gap-2 w-full md:w-auto justify-center"
-              >
-                <Plus size={18} /> Add New Song
-              </button>
-            </div>
-
-            {/* Search and Filter */}
-            <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 mb-8 flex flex-col md:flex-row gap-4 items-center">
-              <div className="relative w-full md:flex-1">
-                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                  <Search className="text-slate-400" size={18} />
-                </div>
-                <input 
-                  type="text" 
-                  placeholder="Search songs or lyrics..." 
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full pl-10 pr-4 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow bg-slate-50"
-                />
-              </div>
-              <div className="flex items-center gap-2 w-full md:w-auto overflow-x-auto pb-2 md:pb-0 hide-scrollbar">
-                 <Filter className="text-slate-400 min-w-fit" size={18} />
-                 <div className="flex gap-2 min-w-max">
-                   <button
-                      onClick={() => setSelectedGenre('All')}
-                      className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${
-                        selectedGenre === 'All' 
-                          ? 'bg-slate-800 text-white shadow-sm' 
-                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                      }`}
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1.5">Genre</label>
+                    <select 
+                      value={formData.genre}
+                      onChange={(e) => setFormData({...formData, genre: e.target.value})}
+                      className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none bg-slate-50 font-medium text-slate-700 cursor-pointer"
                     >
-                      All
-                    </button>
-                    {GENRES.map(genre => {
-                      const count = songs.filter(s => s.genre === genre).length;
-                      if (count === 0 && selectedGenre !== genre) return null;
-                      return (
-                        <button
-                          key={genre}
-                          onClick={() => setSelectedGenre(genre)}
-                          className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors flex items-center gap-1.5 ${
-                            selectedGenre === genre 
-                              ? 'bg-slate-800 text-white shadow-sm' 
-                              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                          }`}
-                        >
-                          {genre} <span className="opacity-60 text-xs">({count})</span>
-                        </button>
-                      )
-                    })}
-                 </div>
-              </div>
-            </div>
-
-            {/* Add/Edit Form Overlay */}
-            {isAddingMode && (
-              <div className="fixed inset-0 z-40 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-200">
-                <Card className="w-full max-w-xl shadow-2xl">
-                  <CardHeader className="flex justify-between items-center border-b border-slate-100 bg-slate-50">
-                    <CardTitle>{editingSongId ? 'Edit Song' : 'Add New Song'}</CardTitle>
-                    <button onClick={() => setIsAddingMode(false)} className="text-slate-400 hover:text-slate-700 p-1 rounded-full hover:bg-slate-200 transition-colors">
-                      <X size={24} />
-                    </button>
-                  </CardHeader>
-                  <form onSubmit={handleSaveSong}>
-                    <CardContent className="space-y-5 pt-6">
-                      {formError && (
-                        <div className="p-3 bg-red-50 border border-red-200 text-red-600 text-sm rounded-xl font-medium">
-                          {formError}
-                        </div>
-                      )}
-                      <div>
-                        <label className="block text-sm font-semibold text-slate-700 mb-1.5">Song Title *</label>
-                        <input 
-                          type="text" 
-                          required
-                          value={formData.name}
-                          onChange={(e) => setFormData({...formData, name: e.target.value})}
-                          className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none bg-slate-50"
-                          placeholder="e.g. Hotel California"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-semibold text-slate-700 mb-1.5">Genre</label>
-                        <select 
-                          value={formData.genre}
-                          onChange={(e) => setFormData({...formData, genre: e.target.value})}
-                          className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none bg-slate-50"
-                        >
-                          {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-sm font-semibold text-slate-700 mb-1.5">Lyrics & Chords</label>
-                        <textarea 
-                          value={formData.text}
-                          onChange={(e) => setFormData({...formData, text: e.target.value})}
-                          className="w-full p-3 border border-slate-200 rounded-xl h-48 focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-sm bg-slate-50"
-                          placeholder="Paste lyrics and chords here..."
-                        />
-                      </div>
-                    </CardContent>
-                    <CardFooter className="justify-end gap-3 rounded-b-2xl">
-                      <button 
-                        type="button" 
-                        onClick={() => setIsAddingMode(false)}
-                        className="px-5 py-2.5 text-slate-600 font-medium hover:bg-slate-200 rounded-xl transition-colors"
-                      >
-                        Cancel
-                      </button>
-                      <button 
-                        type="submit"
-                        disabled={isSaving}
-                        className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-6 py-2.5 rounded-xl font-semibold transition-all shadow-md flex items-center gap-2"
-                      >
-                        <Save size={18} /> {isSaving ? 'Saving...' : 'Save Song'}
-                      </button>
-                    </CardFooter>
-                  </form>
-                </Card>
-              </div>
-            )}
-
-            {/* Song Grid */}
-            {filteredSongs.length === 0 ? (
-              <div className="text-center py-20 bg-white rounded-2xl border border-slate-200 border-dashed">
-                <div className="bg-slate-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-400">
-                  <Search size={32} />
+                      {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
+                    </select>
+                  </div>
                 </div>
-                <p className="text-xl text-slate-600 font-medium mb-2">No songs found.</p>
-                <p className="text-slate-500">Try adjusting your search or filters, or add a new song.</p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {filteredSongs.map((song) => (
-                  <Card key={song.id} className="flex flex-col h-full hover:shadow-md transition-shadow group cursor-pointer" onClick={() => setViewingSong(song)}>
-                    <CardHeader className="pb-3 flex justify-between items-start flex-row">
-                      <div>
-                         <span className="inline-block px-2.5 py-1 bg-indigo-50 text-indigo-700 text-xs font-bold uppercase tracking-wider rounded-md mb-3">
-                          {song.genre}
-                        </span>
-                        <CardTitle className="line-clamp-1">{song.name}</CardTitle>
-                      </div>
-                    </CardHeader>
-                    <CardContent className="flex-grow">
-                      <div className="relative h-32 overflow-hidden rounded-xl bg-slate-50 border border-slate-100 p-4 group-hover:bg-indigo-50/30 transition-colors">
-                        <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-slate-50 group-hover:from-[rgb(244,246,255)] to-transparent pointer-events-none transition-colors"></div>
-                        <p className="text-sm font-mono text-slate-600 whitespace-pre-wrap leading-relaxed">
-                          {song.text || 'No lyrics/chords added.'}
-                        </p>
-                      </div>
-                      {song.lastPracticed && (
-                         <p className="text-xs font-medium text-slate-400 mt-4 flex items-center gap-1.5">
-                           <BookOpen size={14} /> Added: {song.lastPracticed}
-                         </p>
-                      )}
-                    </CardContent>
-                    
-                    <CardFooter className="justify-end gap-2 bg-white relative z-10">
-                      <button 
-                        onClick={(e) => { 
-                          e.stopPropagation(); 
-                          const initialIds = playlists.filter(p => p.songIds.includes(song.id)).map(p => p.id);
-                          setSelectedPlaylistIds(new Set(initialIds));
-                          setPlaylistModal({ isOpen: true, songId: song.id }); 
-                        }}
-                        className="p-2.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl transition-colors"
-                        title="Add to Playlist"
-                      >
-                        <ListPlus size={20} />
-                      </button>
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); handleEdit(song); }}
-                        className="p-2.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"
-                        title="Edit Song"
-                      >
-                        <Edit2 size={20} />
-                      </button>
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); handleDelete(song.id); }}
-                        className="p-2.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors"
-                        title="Delete Song"
-                      >
-                        <Trash2 size={20} />
-                      </button>
-                    </CardFooter>
-                  </Card>
-                ))}
-              </div>
-            )}
-          </>
-        ) : (
-          /* Playlists View */
-          <div>
-            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
-              <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-                <PlaySquare className="text-indigo-600" size={24} /> 
-                My Playlists
-              </h2>
-            </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
-              {/* Playlist Sidebar */}
-              <div className="lg:col-span-1 space-y-4">
-                <Card>
-                  <CardHeader className="pb-3 border-b border-slate-100">
-                    <CardTitle className="text-lg">Lists</CardTitle>
-                  </CardHeader>
-                  <div className="p-3 space-y-1">
-                    {playlists.length === 0 && (
-                       <p className="text-sm text-slate-500 p-3 text-center">No playlists yet.</p>
-                    )}
-                    {playlists.map(playlist => (
-                      <div 
-                        key={playlist.id}
-                        className={`flex items-center justify-between p-3 rounded-xl cursor-pointer transition-colors ${activePlaylistId === playlist.id ? 'bg-indigo-50 border border-indigo-100' : 'hover:bg-slate-50 border border-transparent'}`}
-                        onClick={() => setActivePlaylistId(playlist.id)}
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1.5 flex justify-between items-end">
+                    <span>Lyrics & Chords</span>
+                    <span className="text-xs text-indigo-600 font-medium hidden sm:inline">Use [Chords] for smart formatting</span>
+                  </label>
+                  
+                  {/* Smart Chord Toolbar */}
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {['C', 'G', 'D', 'A', 'E', 'F', 'Am', 'Em', 'Dm'].map(chord => (
+                      <button
+                        key={chord}
+                        type="button"
+                        onMouseDown={(e) => { 
+                          e.preventDefault(); // CRITICAL FIX: Prevents textarea from losing focus!
+                          insertChord(chord); 
+                        }}
+                        className="px-2.5 py-1 bg-white border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 text-slate-600 text-xs font-bold rounded-lg transition-colors shadow-sm"
                       >
-                        <div>
-                          <p className={`font-semibold ${activePlaylistId === playlist.id ? 'text-indigo-700' : 'text-slate-700'}`}>{playlist.name}</p>
-                          <p className="text-xs text-slate-500">{playlist.songIds.length} songs</p>
-                        </div>
-                        <button 
-                          onClick={(e) => { e.stopPropagation(); handleDeletePlaylist(playlist.id); }}
-                          className="text-slate-400 hover:text-red-500 p-1.5 rounded-lg hover:bg-white transition-colors"
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
+                        {chord}
+                      </button>
                     ))}
                   </div>
-                  <CardFooter className="pt-3 pb-3">
-                    {!isCreatingPlaylist ? (
-                      <button
-                        onClick={() => setIsCreatingPlaylist(true)}
-                        className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-medium transition-colors flex items-center justify-center gap-2 text-sm"
-                      >
-                        <Plus size={16} /> New Playlist
-                      </button>
-                    ) : (
-                      <form onSubmit={handleCreatePlaylist} className="flex flex-col gap-2 w-full">
-                        <input
-                          type="text"
-                          value={newPlaylistName}
-                          onChange={(e) => setNewPlaylistName(e.target.value)}
-                          placeholder="Playlist name..."
-                          className="w-full p-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
-                          autoFocus
-                        />
-                        <div className="flex gap-2">
-                          <button
-                            type="button"
-                            onClick={() => setIsCreatingPlaylist(false)}
-                            className="flex-1 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg font-medium transition-colors text-xs"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            type="submit"
-                            className="flex-1 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium transition-colors text-xs"
-                          >
-                            Create
-                          </button>
-                        </div>
-                      </form>
-                    )}
-                  </CardFooter>
-                </Card>
-              </div>
+                  
+                  <textarea 
+                    ref={textareaRef}
+                    value={formData.text}
+                    onChange={(e) => setFormData({...formData, text: e.target.value})}
+                    className="w-full p-3 border border-slate-200 rounded-xl h-64 focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-sm bg-slate-50 leading-relaxed"
+                    placeholder="Type lyrics here... Or type: Today is gonna be the [Em]day"
+                  />
+                </div>
 
-              {/* Active Playlist Details */}
-              <div className="lg:col-span-3">
-                {activePlaylist ? (
-                  <div>
-                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 mb-6 flex items-center justify-between">
-                      <div>
-                        <h3 className="text-2xl font-bold text-slate-800">{activePlaylist.name}</h3>
-                        <p className="text-slate-500 mt-1">{activePlaylist.songIds.length} songs in this list</p>
-                      </div>
-                    </div>
-
-                    {activePlaylist.songIds.length === 0 ? (
-                      <div className="text-center py-20 bg-white rounded-2xl border border-slate-200 border-dashed">
-                        <div className="bg-slate-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-400">
-                          <ListMusic size={32} />
-                        </div>
-                        <p className="text-xl text-slate-600 font-medium mb-2">This playlist is empty.</p>
-                        <p className="text-slate-500">Go to your library and add some songs here!</p>
-                        <button 
-                          onClick={() => setView('songs')}
-                          className="mt-6 px-6 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-medium transition-colors inline-flex items-center gap-2"
-                        >
-                           <ArrowLeft size={16} /> Back to Library
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-                        {activePlaylist.songIds.map(songId => {
-                          const song = songs.find(s => s.id === songId);
-                          if (!song) return null;
-                          return (
-                            <Card key={song.id} className="flex flex-col h-full hover:shadow-md transition-shadow cursor-pointer" onClick={() => setViewingSong(song)}>
-                              <CardHeader className="pb-3">
-                                <span className="inline-block px-2.5 py-1 bg-indigo-50 text-indigo-700 text-xs font-bold uppercase tracking-wider rounded-md mb-3 w-fit">
-                                  {song.genre}
-                               </span>
-                                <CardTitle className="line-clamp-1">{song.name}</CardTitle>
-                              </CardHeader>
-                              <CardContent className="flex-grow">
-                                <div className="relative h-28 overflow-hidden rounded-xl bg-slate-50 border border-slate-100 p-4">
-                                  <div className="absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-slate-50 to-transparent pointer-events-none"></div>
-                                  <p className="text-sm font-mono text-slate-600 whitespace-pre-wrap leading-relaxed">{song.text || 'No lyrics/chords added.'}</p>
-                                </div>
-                              </CardContent>
-                              <CardFooter className="justify-end bg-white relative z-10 border-t-0 pt-0">
-                                <button 
-                                  onClick={(e) => { e.stopPropagation(); toggleSongInPlaylist(activePlaylist.id, song.id); }}
-                                  className="text-sm text-red-600 font-medium px-4 py-2 hover:bg-red-50 rounded-xl transition-colors flex items-center gap-1.5 w-full justify-center border border-red-100"
-                                >
-                                  <Trash2 size={14} /> Remove
-                                </button>
-                              </CardFooter>
-                            </Card>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="h-full flex flex-col items-center justify-center py-20 bg-slate-50 rounded-2xl border border-slate-200 border-dashed text-center px-4">
-                     <div className="bg-white p-4 rounded-full shadow-sm mb-4 text-indigo-300">
-                        <PlaySquare size={40} />
-                     </div>
-                     <h3 className="text-xl font-bold text-slate-700 mb-2">Select a Playlist</h3>
-                     <p className="text-slate-500 max-w-sm">Choose a playlist from the sidebar to view its songs, or create a new one to start organizing your setlists.</p>
-                  </div>
-                )}
+                <div className="pt-4 flex gap-3 justify-end border-t border-slate-100">
+                  <button onClick={() => setIsAddingMode(false)} className="px-6 py-3 rounded-xl font-semibold text-slate-600 hover:bg-slate-100 transition-colors">
+                    Cancel
+                  </button>
+                  <button onClick={handleSaveSong} className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold shadow-md shadow-indigo-200 transition-all active:scale-95 flex items-center gap-2">
+                    <Check size={18} /> Save Song
+                  </button>
+                </div>
               </div>
             </div>
           </div>
-        )}
-      </main>
+        </div>
+      )}
+
+      {}
+      {isPlaylistModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden border border-slate-200">
+            <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+              <h2 className="text-lg font-bold text-slate-800">Add to Playlists</h2>
+              <button onClick={closePlaylistModal} className="text-slate-400 hover:text-slate-700 p-1 rounded-full hover:bg-slate-200 transition-colors">
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="max-h-64 overflow-y-auto p-4 space-y-2">
+              {playlists.length === 0 ? (
+                 <p className="text-sm text-slate-500 text-center py-4">No playlists available. Create one first!</p>
+              ) : (
+                playlists.map(playlist => {
+                  const isSelected = selectedPlaylistIds.includes(playlist.id);
+                  return (
+                    <div 
+                      key={playlist.id} 
+                      onClick={() => togglePlaylistSelection(playlist.id)}
+                      className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer border ${isSelected ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'bg-white border-slate-200 hover:border-indigo-300 hover:bg-slate-50 text-slate-700'} transition-all`}
+                    >
+                      <div className={`w-5 h-5 rounded flex items-center justify-center border ${isSelected ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300 bg-white'}`}>
+                        {isSelected && <Check size={14} strokeWidth={3} />}
+                      </div>
+                      <span className="font-semibold">{playlist.name}</span>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t border-slate-100 flex gap-2 justify-end">
+               <button onClick={closePlaylistModal} className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-200 rounded-lg transition-colors">
+                 Cancel
+               </button>
+               <button onClick={savePlaylistSelection} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold rounded-lg shadow-sm transition-colors">
+                 OK
+               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {}
+      {viewingSong && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-2 sm:p-6 z-50">
+          <div className="bg-white w-full max-w-4xl max-h-full rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+            
+            {/* Viewer Header */}
+            <div className="flex justify-between items-center p-4 sm:p-6 border-b border-slate-100 bg-slate-50 relative shrink-0">
+              <div>
+                <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-800 pr-12 leading-tight">{viewingSong.name}</h2>
+                <span className="inline-block mt-2 px-3 py-1 bg-indigo-100 text-indigo-700 text-xs font-bold uppercase tracking-wider rounded-md border border-indigo-200">
+                  {viewingSong.genre}
+                </span>
+              </div>
+              <button 
+                onClick={() => setViewingSong(null)} 
+                className="absolute top-4 right-4 sm:top-6 sm:right-6 text-slate-400 hover:text-slate-700 p-2 rounded-full hover:bg-slate-200 transition-colors bg-white border border-slate-200 shadow-sm"
+              >
+                <X size={24} />
+              </button>
+            </div>
+            
+            {/* Viewer Body (Smart Chords Rendering) */}
+            <div className="p-6 sm:p-10 overflow-y-auto flex-grow bg-white">
+              <div className="font-mono text-slate-800 text-sm sm:text-base md:text-lg max-w-none">
+                {viewingSong.text ? viewingSong.text.replace(/\r\n/g, '\n').split('\n').map((line, i) => {
+                  
+                  // Empty line
+                  if (line.trim() === '') return <div key={i} className="h-6"></div>;
+
+                  // Section header (e.g. [Chorus], [Verse 1])
+                  const isSection = /^\[\s*(verse|chorus|bridge|intro|outro|solo|pre|hook|part|interlude)/i.test(line.trim());
+                  if (isSection) {
+                     return <div key={i} className="text-indigo-600 font-bold font-sans mt-6 mb-2 tracking-wide uppercase text-sm sm:text-base border-b border-slate-200 pb-1">{line.trim().slice(1, -1)}</div>
+                  }
+
+                  // Plain text line
+                  if (!line.includes('[')) return <div key={i} className="min-h-[1.5rem] whitespace-pre-wrap leading-relaxed">{line}</div>;
+                  
+                  // Parse line for smart chords
+                  const parts = line.split(/(\[[^\]]+\])/g).filter(Boolean);
+                  const pairs = [];
+                  let currentChord = '';
+                  
+                  parts.forEach(part => {
+                    if (part.startsWith('[') && part.endsWith(']')) {
+                        // If a chord is already waiting, push it without lyrics (e.g. back-to-back chords)
+                        if (currentChord) {
+                            pairs.push({ chord: currentChord, lyric: '' });
+                        }
+                        currentChord = part.slice(1, -1);
+                    } else {
+                        pairs.push({ chord: currentChord, lyric: part });
+                        currentChord = '';
+                    }
+                  });
+                  if (currentChord) pairs.push({ chord: currentChord, lyric: '' });
+
+                  return (
+                    <div key={i} className="flex flex-wrap items-end mb-4 leading-tight min-h-[3rem]">
+                      {pairs.map((pair, j) => (
+                          <div key={j} className="flex flex-col justify-end min-h-full">
+                            {pair.chord && (
+                                <span className="text-indigo-600 font-bold text-sm sm:text-base font-sans mb-0.5">{pair.chord}</span>
+                            )}
+                            <span className="whitespace-pre-wrap">{pair.lyric}</span>
+                          </div>
+                      ))}
+                    </div>
+                  );
+                }) : <span className="text-slate-400 italic font-sans">No lyrics or chords added to this song yet.</span>}
+              </div>
+            </div>
+
+            {/* Viewer Navigation Footer */}
+            {currentContextIds.length > 1 && (
+              <div className="bg-slate-50 p-4 border-t border-slate-100 flex items-center justify-between shrink-0">
+                <button 
+                  onClick={handlePrevSong}
+                  disabled={currentSongIndex <= 0}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold transition-all ${currentSongIndex <= 0 ? 'text-slate-300 cursor-not-allowed' : 'text-indigo-600 hover:bg-indigo-100 hover:shadow-sm'}`}
+                >
+                  <ChevronLeft size={20} /> Prev
+                </button>
+                <span className="text-sm font-semibold text-slate-500">
+                  {currentSongIndex + 1} / {currentContextIds.length}
+                </span>
+                <button 
+                  onClick={handleNextSong}
+                  disabled={currentSongIndex >= currentContextIds.length - 1}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold transition-all ${currentSongIndex >= currentContextIds.length - 1 ? 'text-slate-300 cursor-not-allowed' : 'text-indigo-600 hover:bg-indigo-100 hover:shadow-sm'}`}
+                >
+                  Next <ChevronRight size={20} />
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
