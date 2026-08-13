@@ -129,13 +129,13 @@ export default function RepertoireApp() {
   useEffect(() => {
     if (!user) return;
 
-    const songsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'songs');
+    const songsRef = collection(db, 'artifacts', appId, 'public', 'data', 'songs');
     const unsubSongs = onSnapshot(songsRef, (snapshot) => {
       const loadedSongs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setSongs(loadedSongs);
     }, (error) => console.error("Error fetching songs:", error));
 
-    const playlistsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'playlists');
+    const playlistsRef = collection(db, 'artifacts', appId, 'public', 'data', 'playlists');
     const unsubPlaylists = onSnapshot(playlistsRef, (snapshot) => {
       const loadedPlaylists = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setPlaylists(loadedPlaylists);
@@ -165,12 +165,12 @@ export default function RepertoireApp() {
   const handleDelete = async (id) => {
     if (!user) return;
     try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'songs', id));
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'songs', id));
       
       // Remove deleted song from all playlists in DB
       for (const p of playlists) {
         if (p.songIds.includes(id)) {
-          const pRef = doc(db, 'artifacts', appId, 'users', user.uid, 'playlists', p.id);
+          const pRef = doc(db, 'artifacts', appId, 'public', 'data', 'playlists', p.id);
           await updateDoc(pRef, {
             songIds: p.songIds.filter(songId => songId !== id)
           });
@@ -198,10 +198,10 @@ export default function RepertoireApp() {
     setIsSaving(true);
     try {
       if (editingSongId) {
-        const songRef = doc(db, 'artifacts', appId, 'users', user.uid, 'songs', editingSongId);
+        const songRef = doc(db, 'artifacts', appId, 'public', 'data', 'songs', editingSongId);
         await updateDoc(songRef, formData);
       } else {
-        const songsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'songs');
+        const songsRef = collection(db, 'artifacts', appId, 'public', 'data', 'songs');
         await addDoc(songsRef, {
           ...formData,
           lastPracticed: new Date().toISOString().split('T')[0]
@@ -231,7 +231,7 @@ export default function RepertoireApp() {
     if (!newPlaylistName.trim() || !user) return;
     
     try {
-      const playlistsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'playlists');
+      const playlistsRef = collection(db, 'artifacts', appId, 'public', 'data', 'playlists');
       await addDoc(playlistsRef, {
         name: newPlaylistName,
         songIds: []
@@ -246,7 +246,7 @@ export default function RepertoireApp() {
   const handleDeletePlaylist = async (id) => {
     if (!user) return;
     try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'playlists', id));
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'playlists', id));
       if (activePlaylistId === id) setActivePlaylistId(null);
     } catch (err) {
       console.error("Error deleting playlist:", err);
@@ -264,7 +264,7 @@ export default function RepertoireApp() {
         ? p.songIds.filter(id => id !== songId) 
         : [...p.songIds, songId];
         
-      const pRef = doc(db, 'artifacts', appId, 'users', user.uid, 'playlists', playlistId);
+      const pRef = doc(db, 'artifacts', appId, 'public', 'data', 'playlists', playlistId);
       await updateDoc(pRef, { songIds: newSongIds });
     } catch (err) {
       console.error("Error toggling song in playlist:", err);
@@ -282,11 +282,11 @@ export default function RepertoireApp() {
 
         if (hasSongCurrently && !shouldHaveSong) {
           // Remove song from playlist
-          const pRef = doc(db, 'artifacts', appId, 'users', user.uid, 'playlists', playlist.id);
+          const pRef = doc(db, 'artifacts', appId, 'public', 'data', 'playlists', playlist.id);
           await updateDoc(pRef, { songIds: playlist.songIds.filter(id => id !== songId) });
         } else if (!hasSongCurrently && shouldHaveSong) {
           // Add song to playlist
-          const pRef = doc(db, 'artifacts', appId, 'users', user.uid, 'playlists', playlist.id);
+          const pRef = doc(db, 'artifacts', appId, 'public', 'data', 'playlists', playlist.id);
           await updateDoc(pRef, { songIds: [...playlist.songIds, songId] });
         }
       });
