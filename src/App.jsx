@@ -19,7 +19,9 @@ import {
   PlaySquare,
   User,
   Lock,
-  LogOut
+  LogOut,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
 
 // Inline UI Components to ensure the preview works without external UI libraries
@@ -88,9 +90,13 @@ export default function RepertoireApp() {
   const [editingSongId, setEditingSongId] = useState(null);
   const [formData, setFormData] = useState({ name: '', genre: 'Pop', text: '' });
   
+  const [formError, setFormError] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
   // Playlist State
   const [activePlaylistId, setActivePlaylistId] = useState(null);
   const [playlistModal, setPlaylistModal] = useState({ isOpen: false, songId: null });
+  const [selectedPlaylistIds, setSelectedPlaylistIds] = useState(new Set());
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [isCreatingPlaylist, setIsCreatingPlaylist] = useState(false);
 
@@ -146,12 +152,14 @@ export default function RepertoireApp() {
     setIsAddingMode(true);
     setEditingSongId(null);
     setFormData({ name: '', genre: 'Pop', text: '' });
+    setFormError('');
   };
 
   const handleEdit = (song) => {
     setIsAddingMode(true);
     setEditingSongId(song.id);
     setFormData({ name: song.name, genre: song.genre, text: song.text });
+    setFormError('');
   };
 
   const handleDelete = async (id) => {
@@ -175,8 +183,19 @@ export default function RepertoireApp() {
 
   const handleSaveSong = async (e) => {
     e.preventDefault();
-    if (!formData.name.trim() || !user) return;
+    setFormError('');
 
+    if (!formData.name.trim()) {
+      setFormError('Song title is required.');
+      return;
+    }
+
+    if (!user) {
+      setFormError('Not connected to Firebase. Please enable "Anonymous Sign-in" in your Firebase Auth settings.');
+      return;
+    }
+
+    setIsSaving(true);
     try {
       if (editingSongId) {
         const songRef = doc(db, 'artifacts', appId, 'users', user.uid, 'songs', editingSongId);
@@ -188,10 +207,21 @@ export default function RepertoireApp() {
           lastPracticed: new Date().toISOString().split('T')[0]
         });
       }
+      
+      // Successfully saved! Close the popup and reset all form state
       setIsAddingMode(false);
+      setEditingSongId(null);
       setFormData({ name: '', genre: 'Pop', text: '' });
+      
     } catch (err) {
       console.error("Error saving song:", err);
+      setFormError(
+        err.message.includes("permission") 
+          ? "Permission Denied: You need to update your Firestore Database Rules to allow writes." 
+          : `Error: ${err.message}`
+      );
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -241,6 +271,35 @@ export default function RepertoireApp() {
     }
   };
 
+  const handleConfirmPlaylists = async () => {
+    if (!user || !playlistModal.songId) return;
+    const songId = playlistModal.songId;
+
+    try {
+      const updatePromises = playlists.map(async (playlist) => {
+        const hasSongCurrently = playlist.songIds.includes(songId);
+        const shouldHaveSong = selectedPlaylistIds.has(playlist.id);
+
+        if (hasSongCurrently && !shouldHaveSong) {
+          // Remove song from playlist
+          const pRef = doc(db, 'artifacts', appId, 'users', user.uid, 'playlists', playlist.id);
+          await updateDoc(pRef, { songIds: playlist.songIds.filter(id => id !== songId) });
+        } else if (!hasSongCurrently && shouldHaveSong) {
+          // Add song to playlist
+          const pRef = doc(db, 'artifacts', appId, 'users', user.uid, 'playlists', playlist.id);
+          await updateDoc(pRef, { songIds: [...playlist.songIds, songId] });
+        }
+      });
+
+      await Promise.all(updatePromises);
+    } catch (err) {
+      console.error("Error updating playlists:", err);
+    } finally {
+      setPlaylistModal({ isOpen: false, songId: null });
+      setSelectedPlaylistIds(new Set());
+    }
+  };
+
   // Filtered Data
   const filteredSongs = songs.filter(song => {
     const matchesSearch = song.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -255,6 +314,24 @@ export default function RepertoireApp() {
 
   const activePlaylist = activePlaylistId ? playlists.find(p => p.id === activePlaylistId) : null;
 
+  // Viewing Context for Navigation
+  let currentContextIds = [];
+  if (view === 'playlists' && activePlaylist) {
+    currentContextIds = activePlaylist.songIds;
+  } else if (view === 'songs') {
+    currentContextIds = filteredSongs.map(s => s.id);
+  }
+  
+  const currentSongIndex = viewingSong ? currentContextIds.indexOf(viewingSong.id) : -1;
+  const hasPrev = currentSongIndex > 0;
+  const hasNext = currentSongIndex !== -1 && currentSongIndex < currentContextIds.length - 1;
+
+  const navigateToSong = (direction) => {
+    if (currentSongIndex === -1) return;
+    const nextId = currentContextIds[currentSongIndex + direction];
+    const nextSong = songs.find(s => s.id === nextId);
+    if (nextSong) setViewingSong(nextSong);
+  };
 
   if (!isLoggedIn) {
     return (
@@ -365,6 +442,27 @@ export default function RepertoireApp() {
                   {viewingSong.text || 'No lyrics/chords added.'}
                 </pre>
               </div>
+              {currentContextIds.length > 1 && (
+                <div className="flex justify-between items-center p-4 border-t border-slate-100 bg-slate-50">
+                  <button 
+                    onClick={() => navigateToSong(-1)} 
+                    disabled={!hasPrev}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors ${hasPrev ? 'text-indigo-700 hover:bg-indigo-50' : 'text-slate-300 cursor-not-allowed'}`}
+                  >
+                    <ChevronLeft size={20} /> Previous
+                  </button>
+                  <span className="text-sm font-medium text-slate-500">
+                    Song {currentSongIndex + 1} of {currentContextIds.length}
+                  </span>
+                  <button 
+                    onClick={() => navigateToSong(1)} 
+                    disabled={!hasNext}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors ${hasNext ? 'text-indigo-700 hover:bg-indigo-50' : 'text-slate-300 cursor-not-allowed'}`}
+                  >
+                    Next <ChevronRight size={20} />
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -380,22 +478,27 @@ export default function RepertoireApp() {
               </div>
               <div className="p-2 overflow-y-auto flex-grow">
                 {playlists.length === 0 ? (
-                  <p className="text-sm text-slate-500 text-center p-6">No playlists yet. Create one below!</p>
+                  <p className="text-sm text-slate-500 text-center p-6">No playlists yet. Create one in the Playlists tab!</p>
                 ) : (
                   <div className="flex flex-col gap-1 p-2">
                     {playlists.map((playlist) => {
-                      const hasSong = playlist.songIds.includes(playlistModal.songId);
+                      const isSelected = selectedPlaylistIds.has(playlist.id);
                       return (
                         <button
                           key={playlist.id}
-                          onClick={() => toggleSongInPlaylist(playlist.id, playlistModal.songId)}
+                          onClick={() => {
+                            const newSelected = new Set(selectedPlaylistIds);
+                            if (isSelected) newSelected.delete(playlist.id);
+                            else newSelected.add(playlist.id);
+                            setSelectedPlaylistIds(newSelected);
+                          }}
                           className="w-full text-left p-3 rounded-lg flex items-center justify-between hover:bg-slate-50 transition-colors border border-transparent hover:border-slate-100"
                         >
                           <span className="font-medium text-slate-700">{playlist.name}</span>
-                          {hasSong ? (
+                          {isSelected ? (
                             <CheckCircle2 size={20} className="text-emerald-500" />
                           ) : (
-                            <Plus size={20} className="text-slate-400" />
+                            <div className="w-5 h-5 rounded-full border-2 border-slate-300" />
                           )}
                         </button>
                       );
@@ -403,41 +506,19 @@ export default function RepertoireApp() {
                   </div>
                 )}
               </div>
-              <div className="p-4 border-t border-slate-100 bg-slate-50">
-                 {!isCreatingPlaylist ? (
-                    <button
-                      onClick={() => setIsCreatingPlaylist(true)}
-                      className="w-full py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl font-medium transition-colors flex items-center justify-center gap-2 text-sm"
-                    >
-                      <Plus size={16} /> New Playlist
-                    </button>
-                 ) : (
-                    <form onSubmit={handleCreatePlaylist} className="flex flex-col gap-3">
-                      <input
-                        type="text"
-                        value={newPlaylistName}
-                        onChange={(e) => setNewPlaylistName(e.target.value)}
-                        placeholder="Playlist name..."
-                        className="w-full p-2.5 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
-                        autoFocus
-                      />
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setIsCreatingPlaylist(false)}
-                          className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl font-medium transition-colors text-sm"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="submit"
-                          className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-medium transition-colors text-sm"
-                        >
-                          Create
-                        </button>
-                      </div>
-                    </form>
-                 )}
+              <div className="p-4 border-t border-slate-100 bg-slate-50 flex gap-2">
+                <button
+                  onClick={() => setPlaylistModal({ isOpen: false, songId: null })}
+                  className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl font-medium transition-colors text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleConfirmPlaylists}
+                  className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-medium transition-colors text-sm"
+                >
+                  OK
+                </button>
               </div>
             </div>
           </div>
@@ -518,6 +599,11 @@ export default function RepertoireApp() {
                   </CardHeader>
                   <form onSubmit={handleSaveSong}>
                     <CardContent className="space-y-5 pt-6">
+                      {formError && (
+                        <div className="p-3 bg-red-50 border border-red-200 text-red-600 text-sm rounded-xl font-medium">
+                          {formError}
+                        </div>
+                      )}
                       <div>
                         <label className="block text-sm font-semibold text-slate-700 mb-1.5">Song Title *</label>
                         <input 
@@ -559,9 +645,10 @@ export default function RepertoireApp() {
                       </button>
                       <button 
                         type="submit"
-                        className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-xl font-semibold transition-all shadow-md flex items-center gap-2"
+                        disabled={isSaving}
+                        className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-6 py-2.5 rounded-xl font-semibold transition-all shadow-md flex items-center gap-2"
                       >
-                        <Save size={18} /> Save Song
+                        <Save size={18} /> {isSaving ? 'Saving...' : 'Save Song'}
                       </button>
                     </CardFooter>
                   </form>
@@ -606,7 +693,12 @@ export default function RepertoireApp() {
                     
                     <CardFooter className="justify-end gap-2 bg-white relative z-10">
                       <button 
-                        onClick={(e) => { e.stopPropagation(); setPlaylistModal({ isOpen: true, songId: song.id }); }}
+                        onClick={(e) => { 
+                          e.stopPropagation(); 
+                          const initialIds = playlists.filter(p => p.songIds.includes(song.id)).map(p => p.id);
+                          setSelectedPlaylistIds(new Set(initialIds));
+                          setPlaylistModal({ isOpen: true, songId: song.id }); 
+                        }}
                         className="p-2.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl transition-colors"
                         title="Add to Playlist"
                       >

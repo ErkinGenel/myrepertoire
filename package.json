@@ -1,19 +1,19 @@
 {
-  "homepage": "https://erkingenel.github.io/tennis-tournament-organizer",
-  "name": "tennis-tournament-organizer",
+  "homepage": "https://erkingenel.github.io/myrepertoire",
+  "name": "myrepertoire",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-	  "dev": "vite",
-	  "build": "vite build",
-	  "lint": "eslint .",
-	  "preview": "vite preview",
-	  "predeploy": "npm run build",
-	  "deploy": "gh-pages -d dist"
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "predeploy": "npm run build",
+    "deploy": "gh-pages -d dist"
   },
   "dependencies": {
-    "firebase": "^12.15.0",
+    "firebase": "^12.17.1",
     "lucide-react": "^1.17.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
