@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Music, Plus, ListMusic, X, Edit2, Trash2, Play, ChevronRight, ChevronDown, Check, Lock, ChevronLeft, Camera, Loader2, Database, Grid, List } from 'lucide-react';
+import { Search, Music, Plus, ListMusic, X, Edit2, Trash2, Play, ChevronRight, ChevronDown, Check, Lock, ChevronLeft, Camera, Loader2, Database, Grid, List, Minus } from 'lucide-react';
 import { initializeApp, getApps } from "firebase/app";
 import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot } from 'firebase/firestore';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
@@ -17,6 +17,36 @@ const firebaseConfig = {
 let app, db, auth;
 
 const GENRES = ['Pop', 'Rock', 'Jazz', 'Classical', 'Folk', 'R&B', 'Country', 'Other'];
+
+const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const FLAT_TO_SHARP = { 'Db': 'C#', 'Eb': 'D#', 'Gb': 'F#', 'Ab': 'G#', 'Bb': 'A#' };
+
+const transposeChord = (chord, steps) => {
+  if (!chord || steps === 0) return chord;
+  
+  const transposeNote = (note) => {
+    let root = note;
+    if (FLAT_TO_SHARP[root]) root = FLAT_TO_SHARP[root];
+    const index = NOTES.indexOf(root);
+    if (index === -1) return note; // fallback if note is unrecognized
+    const newIndex = (((index + steps) % 12) + 12) % 12;
+    return NOTES[newIndex];
+  };
+
+  // Match Main Note and Optional Bass Note (e.g. Am7/G)
+  const match = chord.match(/^([A-G][b#]?)([^/]*)(?:\/([A-G][b#]?))?$/);
+  if (!match) return chord;
+  
+  const mainRoot = match[1];
+  const suffix = match[2];
+  const bassNote = match[3];
+
+  let newChord = transposeNote(mainRoot) + suffix;
+  if (bassNote) {
+    newChord += '/' + transposeNote(bassNote);
+  }
+  return newChord;
+};
 
 export default function RepertoireApp() {
   // System Readiness State
@@ -50,6 +80,12 @@ export default function RepertoireApp() {
 
   // Viewer State
   const [viewingSong, setViewingSong] = useState(null);
+  const [transposeAmount, setTransposeAmount] = useState(0);
+
+  // Reset transpose amount when a new song is opened
+  useEffect(() => {
+    setTransposeAmount(0);
+  }, [viewingSong]);
 
   // Playlist Management State
   const [newPlaylistName, setNewPlaylistName] = useState('');
@@ -994,9 +1030,33 @@ export default function RepertoireApp() {
               <div>
                 <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-800 pr-12 leading-tight">{viewingSong.name}</h2>
                 {viewingSong.artist && <p className="text-lg text-slate-600 font-medium mt-1">{viewingSong.artist}</p>}
-                <span className="inline-block mt-2 px-3 py-1 bg-indigo-100 text-indigo-700 text-xs font-bold uppercase tracking-wider rounded-md border border-indigo-200">
-                  {viewingSong.genre}
-                </span>
+                <div className="flex flex-wrap items-center gap-3 mt-2">
+                  <span className="inline-block px-3 py-1 bg-indigo-100 text-indigo-700 text-xs font-bold uppercase tracking-wider rounded-md border border-indigo-200">
+                    {viewingSong.genre}
+                  </span>
+                  {viewingSong.text && viewingSong.text.includes('[') && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Transpose</span>
+                      <div className="flex items-center bg-white border border-slate-200 rounded-md shadow-sm h-7">
+                        <button 
+                          onClick={() => setTransposeAmount(prev => prev - 1)}
+                          className="px-2 h-full text-slate-500 hover:text-indigo-600 hover:bg-slate-50 rounded-l-md border-r border-slate-100 flex items-center justify-center transition-colors"
+                        >
+                          <Minus size={14} />
+                        </button>
+                        <span className="w-8 text-center text-xs font-bold text-slate-700">
+                          {transposeAmount > 0 ? `+${transposeAmount}` : transposeAmount}
+                        </span>
+                        <button 
+                          onClick={() => setTransposeAmount(prev => prev + 1)}
+                          className="px-2 h-full text-slate-500 hover:text-indigo-600 hover:bg-slate-50 rounded-r-md border-l border-slate-100 flex items-center justify-center transition-colors"
+                        >
+                          <Plus size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
               <button 
                 onClick={() => setViewingSong(null)} 
@@ -1047,7 +1107,9 @@ export default function RepertoireApp() {
                       {pairs.map((pair, j) => (
                           <div key={j} className="flex flex-col justify-end min-h-full">
                             {pair.chord && (
-                                <span className="text-indigo-600 font-bold text-sm sm:text-base font-sans mb-0.5">{pair.chord}</span>
+                                <span className="text-indigo-600 font-bold text-sm sm:text-base font-sans mb-0.5">
+                                  {transposeChord(pair.chord, transposeAmount)}
+                                </span>
                             )}
                             <span className="whitespace-pre-wrap">{pair.lyric}</span>
                           </div>
