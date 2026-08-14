@@ -1,12 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Music, Plus, ListMusic, X, Edit2, Trash2, Play, ChevronRight, ChevronDown, Check, Lock, ChevronLeft, Camera, Loader2 } from 'lucide-react';
-import { initializeApp } from "firebase/app";
+import { Search, Music, Plus, ListMusic, X, Edit2, Trash2, Play, ChevronRight, ChevronDown, Check, Lock, ChevronLeft, Camera, Loader2, Database, Grid, List } from 'lucide-react';
+import { initializeApp, getApps } from "firebase/app";
 import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot } from 'firebase/firestore';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 
-// Your web app's Firebase configuration
+// Base configuration (API Key removed for security)
 const firebaseConfig = {
-  apiKey: "AIzaSyAmkG9L75KSnFaSG0haIDMcVYQuYuP5mq0",
   authDomain: "myrepertoiregithub.firebaseapp.com",
   projectId: "myrepertoiregithub",
   storageBucket: "myrepertoiregithub.firebasestorage.app",
@@ -14,14 +13,16 @@ const firebaseConfig = {
   appId: "1:248740253880:web:0ee3562276e225fcae244d"
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
-const auth = getAuth(app);
+// Initialize variables empty; they will be set dynamically
+let app, db, auth;
 
 const GENRES = ['Pop', 'Rock', 'Jazz', 'Classical', 'Folk', 'R&B', 'Country', 'Other'];
 
 export default function RepertoireApp() {
+  // System Readiness State
+  const [isFirebaseReady, setIsFirebaseReady] = useState(false);
+  const [firebaseKeyInput, setFirebaseKeyInput] = useState('');
+
   // Authentication State
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
@@ -33,6 +34,7 @@ export default function RepertoireApp() {
   
   // UI View State
   const [activeTab, setActiveTab] = useState('library');
+  const [viewMode, setViewMode] = useState('grid');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedGenre, setSelectedGenre] = useState('All');
   
@@ -56,8 +58,51 @@ export default function RepertoireApp() {
   const [playlistModalSongId, setPlaylistModalSongId] = useState(null);
   const [selectedPlaylistIds, setSelectedPlaylistIds] = useState([]);
 
+  const setupFirebase = (apiKey) => {
+    try {
+      if (getApps().length === 0) {
+        app = initializeApp({ ...firebaseConfig, apiKey });
+      } else {
+        app = getApps()[0];
+      }
+      db = getFirestore(app);
+      auth = getAuth(app);
+      setIsFirebaseReady(true);
+    } catch (error) {
+      console.error("Firebase setup error:", error);
+      alert("Invalid Firebase API Key");
+      localStorage.removeItem('firebase_api_key');
+    }
+  };
+
+  useEffect(() => {
+    const savedKey = localStorage.getItem('firebase_api_key');
+    
+    // Auto-inject for Canvas testing environment
+    if (typeof __firebase_config !== 'undefined') {
+        try {
+            const injectedConfig = JSON.parse(__firebase_config);
+            setupFirebase(injectedConfig.apiKey);
+        } catch (e) {
+            console.error("Error parsing injected Firebase config");
+        }
+    } else if (savedKey) {
+        setupFirebase(savedKey);
+    }
+  }, []);
+
+  const handleSaveFirebaseKey = (e) => {
+    e.preventDefault();
+    if (firebaseKeyInput.trim()) {
+        localStorage.setItem('firebase_api_key', firebaseKeyInput.trim());
+        setupFirebase(firebaseKeyInput.trim());
+    }
+  };
+
   // 1. Initialize Authentication Correctly on Load
   useEffect(() => {
+    if (!isFirebaseReady || !auth) return;
+
     const initAuth = async () => {
       try {
         // Platform specific token handshake or fallback to anonymous auth
@@ -83,11 +128,11 @@ export default function RepertoireApp() {
     });
     
     return () => unsubscribe();
-  }, []);
+  }, [isFirebaseReady]);
 
   // 2. Fetch Data only when Authenticated & Unlocked
   useEffect(() => {
-    if (!user || !isAuthenticated) return;
+    if (!isFirebaseReady || !db || !user || !isAuthenticated) return;
 
     // Listen to shared public data folder
     const songsRef = collection(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'songs');
@@ -111,7 +156,7 @@ export default function RepertoireApp() {
       unsubSongs();
       unsubPlaylists();
     };
-  }, [isAuthenticated, user]);
+  }, [isFirebaseReady, isAuthenticated, user]);
 
   const handleLogin = (e) => {
     e.preventDefault();
@@ -426,6 +471,37 @@ export default function RepertoireApp() {
     }
   };
 
+  if (!isFirebaseReady) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="bg-white max-w-md w-full rounded-2xl shadow-xl p-8 border border-slate-100 text-center">
+          <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-6 text-emerald-600">
+            <Database size={32} />
+          </div>
+          <h1 className="text-2xl font-bold text-slate-800 mb-2">Connect Database</h1>
+          <p className="text-slate-500 mb-8 text-sm">
+            To keep your app secure on GitHub Pages, enter your Firebase Web API Key. You can find it in your <a href="https://console.firebase.google.com/project/_/settings/general" target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline font-semibold">Firebase Project Settings</a>. It will be saved locally on your device.
+          </p>
+          <form onSubmit={handleSaveFirebaseKey} className="space-y-4">
+            <input
+              type="password"
+              value={firebaseKeyInput}
+              onChange={(e) => setFirebaseKeyInput(e.target.value)}
+              placeholder="Firebase API Key..."
+              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-slate-50 text-center"
+            />
+            <button
+              type="submit"
+              className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-md shadow-emerald-200 transition-colors"
+            >
+              Connect Database
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
@@ -500,6 +576,22 @@ export default function RepertoireApp() {
               />
             </div>
             <div className="flex gap-2">
+              <div className="hidden sm:flex items-center bg-slate-100 p-1 rounded-xl">
+                <button 
+                  onClick={() => setViewMode('grid')}
+                  className={`p-2 rounded-lg transition-all ${viewMode === 'grid' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                  title="Grid View"
+                >
+                  <Grid size={20} />
+                </button>
+                <button 
+                  onClick={() => setViewMode('list')}
+                  className={`p-2 rounded-lg transition-all ${viewMode === 'list' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                  title="List View"
+                >
+                  <List size={20} />
+                </button>
+              </div>
               <select 
                 value={selectedGenre}
                 onChange={(e) => setSelectedGenre(e.target.value)}
@@ -520,38 +612,74 @@ export default function RepertoireApp() {
 
         {/* Library View */}
         {activeTab === 'library' && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <>
             {filteredSongs.length === 0 ? (
-              <div className="col-span-full py-12 text-center text-slate-500">
+              <div className="py-12 text-center text-slate-500">
                 <Music size={48} className="mx-auto mb-4 opacity-20" />
                 <p className="text-lg">No songs found.</p>
               </div>
-            ) : (
-              filteredSongs.map(song => (
-                <div key={song.id} className="bg-white border border-slate-200 rounded-2xl p-5 hover:border-indigo-300 hover:shadow-lg transition-all group relative overflow-hidden flex flex-col h-full">
-                  <div className="flex justify-between items-start mb-2">
-                    <div>
-                      <h3 className="text-xl font-bold text-slate-800 pr-4 leading-tight">{song.name}</h3>
-                      {song.artist && <p className="text-sm text-slate-500 font-medium mt-1">{song.artist}</p>}
+            ) : viewMode === 'grid' ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {filteredSongs.map(song => (
+                  <div key={song.id} className="bg-white border border-slate-200 rounded-2xl p-5 hover:border-indigo-300 hover:shadow-lg transition-all group relative overflow-hidden flex flex-col h-full">
+                    <div className="flex justify-between items-start mb-2">
+                      <div>
+                        <h3 className="text-xl font-bold text-slate-800 pr-4 leading-tight">{song.name}</h3>
+                        {song.artist && <p className="text-sm text-slate-500 font-medium mt-1">{song.artist}</p>}
+                      </div>
+                      <span className="px-2.5 py-1 bg-slate-100 text-slate-600 text-xs font-bold uppercase tracking-wider rounded-md border border-slate-200">
+                        {song.genre}
+                      </span>
                     </div>
-                    <span className="px-2.5 py-1 bg-slate-100 text-slate-600 text-xs font-bold uppercase tracking-wider rounded-md border border-slate-200">
-                      {song.genre}
-                    </span>
+                    
+                    <div className="flex-grow mt-2 relative">
+                      <p className="text-sm text-slate-500 font-mono line-clamp-3 whitespace-pre-wrap">{song.text || "No lyrics added."}</p>
+                      <div className="absolute inset-0 bg-gradient-to-t from-white to-transparent pointer-events-none"></div>
+                    </div>
+                    
+                    <div className="mt-4 pt-4 border-t border-slate-100 flex items-center justify-between gap-2">
+                      <button 
+                        onClick={() => { setViewingSong(song); setExpandedPlaylistId(null); }}
+                        className="flex items-center justify-center gap-1.5 flex-grow bg-indigo-50 hover:bg-indigo-100 text-indigo-700 py-2 rounded-lg font-semibold text-sm transition-colors"
+                      >
+                        <Play size={16} /> View
+                      </button>
+                      <div className="flex gap-1">
+                        <button onClick={() => openPlaylistModal(song.id)} className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="Add to Playlist">
+                          <ListMusic size={18} />
+                        </button>
+                        <button onClick={() => handleEdit(song)} className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors" title="Edit">
+                          <Edit2 size={18} />
+                        </button>
+                        <button onClick={() => handleDeleteSong(song.id)} className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="Delete">
+                          <Trash2 size={18} />
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                  
-                  <div className="flex-grow mt-2 relative">
-                    <p className="text-sm text-slate-500 font-mono line-clamp-3 whitespace-pre-wrap">{song.text || "No lyrics added."}</p>
-                    <div className="absolute inset-0 bg-gradient-to-t from-white to-transparent pointer-events-none"></div>
-                  </div>
-                  
-                  <div className="mt-4 pt-4 border-t border-slate-100 flex items-center justify-between gap-2">
-                    <button 
-                      onClick={() => { setViewingSong(song); setExpandedPlaylistId(null); }}
-                      className="flex items-center justify-center gap-1.5 flex-grow bg-indigo-50 hover:bg-indigo-100 text-indigo-700 py-2 rounded-lg font-semibold text-sm transition-colors"
-                    >
-                      <Play size={16} /> View
-                    </button>
-                    <div className="flex gap-1">
+                ))}
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {filteredSongs.map(song => (
+                  <div key={song.id} className="bg-white border border-slate-200 rounded-xl p-4 hover:border-indigo-300 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm hover:shadow-md">
+                    <div className="flex-grow min-w-0">
+                      <div className="flex items-center gap-3 mb-1">
+                        <h3 className="text-lg font-bold text-slate-800 truncate">{song.name}</h3>
+                        <span className="px-2 py-0.5 bg-slate-100 text-slate-600 text-[10px] font-bold uppercase tracking-wider rounded border border-slate-200 shrink-0">
+                          {song.genre}
+                        </span>
+                      </div>
+                      {song.artist && <p className="text-sm text-slate-500 font-medium truncate">{song.artist}</p>}
+                    </div>
+                    
+                    <div className="flex items-center gap-2 shrink-0 sm:border-l sm:border-slate-100 sm:pl-4">
+                      <button 
+                        onClick={() => { setViewingSong(song); setExpandedPlaylistId(null); }}
+                        className="flex items-center gap-1.5 px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg font-semibold text-sm transition-colors"
+                      >
+                        <Play size={16} /> View
+                      </button>
                       <button onClick={() => openPlaylistModal(song.id)} className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="Add to Playlist">
                         <ListMusic size={18} />
                       </button>
@@ -563,10 +691,10 @@ export default function RepertoireApp() {
                       </button>
                     </div>
                   </div>
-                </div>
-              ))
+                ))}
+              </div>
             )}
-          </div>
+          </>
         )}
 
         {/* Playlists View */}
