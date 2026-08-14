@@ -1,11 +1,61 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Music, Plus, ListMusic, X, Edit2, Trash2, Play, ChevronRight, ChevronDown, Check, Lock, ChevronLeft, Camera, Loader2, Database, Grid, List, Minus } from 'lucide-react';
+import { Search, Music, Plus, ListMusic, X, Edit2, Trash2, Play, ChevronRight, ChevronDown, Check, Lock, ChevronLeft, Camera, Loader2, Database, Grid, List, Minus, Star, Hash } from 'lucide-react';
 import { initializeApp, getApps } from "firebase/app";
-import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot } from 'firebase/firestore';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
+import { getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc, updateDoc } from "firebase/firestore";
 
-// Base configuration (API Key removed for security)
-const firebaseConfig = {
+const GENRES = ['Rock', 'Pop', 'Jazz', 'Blues', 'Folk', 'Classical', 'R&B', 'Country', 'Electronic', 'Other'];
+
+// Transpose helper variables
+const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const FLATS = {'Db': 'C#', 'Eb': 'D#', 'Gb': 'F#', 'Ab': 'G#', 'Bb': 'A#'};
+
+const transposeChord = (chord, steps) => {
+  const match = chord.match(/^([A-G][b#]?)(.*?)(\/([A-G][b#]?))?$/);
+  if (!match) return chord;
+
+  let [, baseNote, modifier, , bassNote] = match;
+
+  const transposeNote = (note) => {
+    if (!note) return '';
+    let n = FLATS[note] || note;
+    let idx = NOTES.indexOf(n);
+    if (idx === -1) return note;
+    let newIdx = (idx + steps) % 12;
+    if (newIdx < 0) newIdx += 12;
+    return NOTES[newIdx];
+  };
+
+  let transposedBase = transposeNote(baseNote);
+  let transposedBass = bassNote ? '/' + transposeNote(bassNote) : '';
+  return transposedBase + modifier + transposedBass;
+};
+
+const transposeLyrics = (lyrics, steps) => {
+  if (steps === 0 || !lyrics) return lyrics;
+  return lyrics.replace(/\[(.*?)\]/g, (match, chord) => {
+    return '[' + transposeChord(chord, steps) + ']';
+  });
+};
+
+const fileToBase64 = (file) => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => {
+      let encoded = reader.result.toString().replace(/^data:(.*,)?/, '');
+      if ((encoded.length % 4) > 0) {
+        encoded += '='.repeat(4 - (encoded.length % 4));
+      }
+      resolve(encoded);
+    };
+    reader.onerror = error => reject(error);
+  });
+};
+
+// 1. FIREBASE CONFIGURATION (Hardcoded for GitHub Pages)
+const myFirebaseConfig = {
+  apiKey: "AIzaSyAmkG9L75KSnFaSG0haIDMcVYQuYuP5mq0",
   authDomain: "myrepertoiregithub.firebaseapp.com",
   projectId: "myrepertoiregithub",
   storageBucket: "myrepertoiregithub.firebasestorage.app",
@@ -13,427 +63,238 @@ const firebaseConfig = {
   appId: "1:248740253880:web:0ee3562276e225fcae244d"
 };
 
-// Initialize variables empty; they will be set dynamically
-let app, db, auth;
-
-const GENRES = ['Pop', 'Rock', 'Jazz', 'Classical', 'Folk', 'R&B', 'Country', 'Other'];
-
-const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-const FLAT_TO_SHARP = { 'Db': 'C#', 'Eb': 'D#', 'Gb': 'F#', 'Ab': 'G#', 'Bb': 'A#' };
-
-const transposeChord = (chord, steps) => {
-  if (!chord || steps === 0) return chord;
-  
-  const transposeNote = (note) => {
-    let root = note;
-    if (FLAT_TO_SHARP[root]) root = FLAT_TO_SHARP[root];
-    const index = NOTES.indexOf(root);
-    if (index === -1) return note; // fallback if note is unrecognized
-    const newIndex = (((index + steps) % 12) + 12) % 12;
-    return NOTES[newIndex];
-  };
-
-  // Match Main Note and Optional Bass Note (e.g. Am7/G)
-  const match = chord.match(/^([A-G][b#]?)([^/]*)(?:\/([A-G][b#]?))?$/);
-  if (!match) return chord;
-  
-  const mainRoot = match[1];
-  const suffix = match[2];
-  const bassNote = match[3];
-
-  let newChord = transposeNote(mainRoot) + suffix;
-  if (bassNote) {
-    newChord += '/' + transposeNote(bassNote);
-  }
-  return newChord;
-};
-
 export default function RepertoireApp() {
-  // System Readiness State
-  const [isFirebaseReady, setIsFirebaseReady] = useState(false);
-  const [firebaseKeyInput, setFirebaseKeyInput] = useState('');
+  // Environment Config Fallbacks
+  const appId = typeof __app_id !== 'undefined' ? __app_id : 'repertoire-app-id';
+  
+  // API Keys & Firebase Connection
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
 
-  // Authentication State
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [geminiApiKey, setGeminiApiKey] = useState(localStorage.getItem('repertoire_gemini_api_key') || '');
+  const [isGeminiModalOpen, setIsGeminiModalOpen] = useState(false);
+
+  // Auth & Roles
+  const [userRole, setUserRole] = useState(null); // 'admin', 'guest', or null
   const [passwordInput, setPasswordInput] = useState('');
   const [user, setUser] = useState(null);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
 
-  // Core Data State
+  // Core Data
   const [songs, setSongs] = useState([]);
   const [playlists, setPlaylists] = useState([]);
-  
-  // UI View State
-  const [activeTab, setActiveTab] = useState('library');
-  const [viewMode, setViewMode] = useState('grid');
+  const [wishlist, setWishlist] = useState([]);
+
+  // UI State
+  const [activeTab, setActiveTab] = useState('library'); // 'library', 'playlists', 'wishlist'
+  const [viewMode, setViewMode] = useState('grid'); // 'grid' or 'list'
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedGenre, setSelectedGenre] = useState('All');
-  
-  // Form State
-  const [isAddingMode, setIsAddingMode] = useState(false);
+  const [genreFilter, setGenreFilter] = useState('All');
+  const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingSongId, setEditingSongId] = useState(null);
-  const [formData, setFormData] = useState({ name: '', artist: '', genre: 'Pop', text: '' });
-  const [formError, setFormError] = useState('');
-  const [isScanningImage, setIsScanningImage] = useState(false);
-  const [showApiKeyPrompt, setShowApiKeyPrompt] = useState(false);
-  const [apiKeyInput, setApiKeyInput] = useState('');
-  const textareaRef = useRef(null);
-
-  // Viewer State
   const [viewingSong, setViewingSong] = useState(null);
-  const [transposeAmount, setTransposeAmount] = useState(0);
+  const [transposeSteps, setTransposeSteps] = useState(0);
 
-  // Reset transpose amount when a new song is opened
-  useEffect(() => {
-    setTransposeAmount(0);
-  }, [viewingSong]);
-
-  // Playlist Management State
+  // Form States
+  const [newSong, setNewSong] = useState({ title: '', artist: '', genre: 'Pop', tempo: '', key: '', lyrics: '', youtubeUrl: '' });
   const [newPlaylistName, setNewPlaylistName] = useState('');
+  const [newWishlistSong, setNewWishlistSong] = useState({ name: '', artist: '' });
+  
+  // Playlist Management
   const [expandedPlaylistId, setExpandedPlaylistId] = useState(null);
   const [isPlaylistModalOpen, setIsPlaylistModalOpen] = useState(false);
   const [playlistModalSongId, setPlaylistModalSongId] = useState(null);
   const [selectedPlaylistIds, setSelectedPlaylistIds] = useState([]);
 
-  const setupFirebase = (apiKey) => {
+  // AI Scanning
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanError, setScanError] = useState('');
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
     try {
-      if (getApps().length === 0) {
-        app = initializeApp({ ...firebaseConfig, apiKey });
+      // Use Canvas config if testing here, otherwise use your hardcoded config for GitHub Pages
+      const config = typeof __firebase_config !== 'undefined' 
+        ? JSON.parse(__firebase_config) 
+        : myFirebaseConfig; 
+
+      let app;
+      if (!getApps().length) {
+        app = initializeApp(config);
       } else {
         app = getApps()[0];
       }
-      db = getFirestore(app);
-      auth = getAuth(app);
-      setIsFirebaseReady(true);
-    } catch (error) {
-      console.error("Firebase setup error:", error);
-      alert("Invalid Firebase API Key");
-      localStorage.removeItem('firebase_api_key');
-    }
-  };
 
-  useEffect(() => {
-    const savedKey = localStorage.getItem('firebase_api_key');
-    
-    // Auto-inject for Canvas testing environment
-    if (typeof __firebase_config !== 'undefined') {
-        try {
-            const injectedConfig = JSON.parse(__firebase_config);
-            setupFirebase(injectedConfig.apiKey);
-        } catch (e) {
-            console.error("Error parsing injected Firebase config");
-        }
-    } else if (savedKey) {
-        setupFirebase(savedKey);
+      const firebaseDb = getFirestore(app);
+      const firebaseAuth = getAuth(app);
+      setDb(firebaseDb);
+      setAuth(firebaseAuth);
+
+      const unsubscribe = onAuthStateChanged(firebaseAuth, (currentUser) => {
+        setUser(currentUser);
+        setIsAuthenticating(false);
+      });
+
+      return () => unsubscribe();
+    } catch (error) {
+      console.error("Firebase init error:", error);
     }
   }, []);
 
-  const handleSaveFirebaseKey = (e) => {
-    e.preventDefault();
-    if (firebaseKeyInput.trim()) {
-        localStorage.setItem('firebase_api_key', firebaseKeyInput.trim());
-        setupFirebase(firebaseKeyInput.trim());
-    }
-  };
-
-  // 1. Initialize Authentication Correctly on Load
   useEffect(() => {
-    if (!isFirebaseReady || !auth) return;
+    if (!db || !user || !userRole) return;
 
-    const initAuth = async () => {
-      try {
-        // Platform specific token handshake or fallback to anonymous auth
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          try {
-            await signInWithCustomToken(auth, __initial_auth_token);
-          } catch (e) {
-            await signInAnonymously(auth);
-          }
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (error) {
-        console.error("Firebase auth initialization error:", error);
-      }
-    };
-    
-    initAuth();
-    
-    // Track when the user session is officially ready
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-    });
-    
-    return () => unsubscribe();
-  }, [isFirebaseReady]);
-
-  // 2. Fetch Data only when Authenticated & Unlocked
-  useEffect(() => {
-    if (!isFirebaseReady || !db || !user || !isAuthenticated) return;
-
-    // Listen to shared public data folder
-    const songsRef = collection(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'songs');
-    const playlistsRef = collection(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'playlists');
+    const songsRef = collection(db, 'artifacts', appId, 'public', 'data', 'songs');
+    const playlistsRef = collection(db, 'artifacts', appId, 'public', 'data', 'playlists');
+    const wishlistRef = collection(db, 'artifacts', appId, 'public', 'data', 'wishlist');
 
     const unsubSongs = onSnapshot(songsRef, (snapshot) => {
-      const songsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setSongs(songsData);
-    }, (error) => {
-      console.error("Error fetching songs:", error);
-    });
+      setSongs(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    }, console.error);
 
     const unsubPlaylists = onSnapshot(playlistsRef, (snapshot) => {
-      const playlistsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setPlaylists(playlistsData);
-    }, (error) => {
-      console.error("Error fetching playlists:", error);
-    });
+      setPlaylists(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    }, console.error);
+    
+    const unsubWishlist = onSnapshot(wishlistRef, (snapshot) => {
+      setWishlist(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    }, console.error);
 
     return () => {
       unsubSongs();
       unsubPlaylists();
+      unsubWishlist();
     };
-  }, [isFirebaseReady, isAuthenticated, user]);
+  }, [db, user, userRole, appId]);
 
-  const handleLogin = (e) => {
-    e.preventDefault();
-    if (passwordInput === 'myrepertoire') { // Simple password for shared app
-      setIsAuthenticated(true);
-    } else {
+  const handleLogin = async (e, role) => {
+    if (e) e.preventDefault();
+    
+    if (role === 'admin' && passwordInput !== 'myrepertoire') {
       alert("Incorrect password");
+      return;
     }
-  };
 
-  const insertChord = (chord) => {
-    const textarea = textareaRef.current;
-    if (!textarea) {
-        setFormData({...formData, text: (formData.text || '') + `[${chord}]`});
-        return;
-    }
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const text = formData.text || '';
-    const before = text.substring(0, start);
-    const after = text.substring(end, text.length);
-    const newText = before + `[${chord}]` + after;
-    
-    setFormData({ ...formData, text: newText });
-    
-    // Tiny timeout ensures React state updates before we move the cursor
-    setTimeout(() => {
-      textarea.setSelectionRange(start + chord.length + 2, start + chord.length + 2);
-      textarea.focus();
-    }, 10);
-  };
-
-  const fileToBase64 = (file) => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.readAsDataURL(file);
-    reader.onload = () => resolve(reader.result.split(',')[1]);
-    reader.onerror = error => reject(error);
-  });
-
-  const triggerImageUpload = (e) => {
-    // Check if we are in the special Canvas environment which auto-injects keys
-    // OR if the user has already saved their own key
-    const savedKey = localStorage.getItem('gemini_api_key');
-    const isCanvasEnvironment = window.location.hostname.includes('google.com') || window.location.hostname === 'localhost';
-
-    if (savedKey || isCanvasEnvironment) {
-       // We have a key or don't need one, proceed to file selection
-       document.getElementById('image-upload').click();
-    } else {
-       // We need a key from the user
-       setShowApiKeyPrompt(true);
-    }
-  };
-
-  const handleSaveApiKey = () => {
-    if (apiKeyInput.trim()) {
-      localStorage.setItem('gemini_api_key', apiKeyInput.trim());
-      setShowApiKeyPrompt(false);
-      // Immediately open the file picker now that we have a key
-      setTimeout(() => document.getElementById('image-upload').click(), 100);
-    }
-  };
-
-  const handleImageUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    setIsScanningImage(true);
-    setFormError('');
-
+    setIsAuthenticating(true);
     try {
-      const base64Data = await fileToBase64(file);
-      
-      // Get the key: Either from local storage (if user provided it) or leave empty for Canvas auto-injection
-      const savedKey = localStorage.getItem('gemini_api_key');
-      const apiKey = savedKey ? savedKey : ""; 
-      
-      // Upgraded to Gemini 3 Flash Preview for better image understanding
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
-
-      const prompt = `Extract the lyrics and chords from this image. 
-      Convert it into a specific format: Place every chord inside square brackets directly in front of the word or syllable it aligns with based on its position in the image. 
-      For example, if the chord 'G' is placed directly above the word 'Love', output '[G]Love'. 
-      Preserve all verses, choruses, and line breaks. 
-      Return ONLY the plain text result without any markdown formatting blocks like \`\`\`.`;
-
-      const payload = {
-        contents: [
-          {
-            role: "user",
-            parts: [
-              { text: prompt },
-              {
-                inlineData: {
-                  mimeType: file.type,
-                  data: base64Data
-                }
-              }
-            ]
-          }
-        ]
-      };
-
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      const result = await response.json();
-
-      if (response.status === 400 && savedKey) {
-          // If a bad request happens and we used a saved key, it might be invalid.
-          localStorage.removeItem('gemini_api_key');
-          throw new Error("Invalid API Key. Please try again.");
+      if (!user && auth) {
+        await signInAnonymously(auth);
       }
-      
-      if (result.error) {
-          throw new Error(`API Error: ${result.error.message}`);
-      }
-      
-      if (result.candidates && result.candidates.length > 0 && result.candidates[0].content) {
-        let extractedText = result.candidates[0].content.parts[0].text;
-        extractedText = extractedText.replace(/^```[a-z]*\n/i, '').replace(/\n```$/i, '');
-        
-        setFormData(prev => ({ 
-          ...prev, 
-          text: prev.text ? prev.text + '\n\n' + extractedText : extractedText 
-        }));
-      } else if (result.promptFeedback) {
-        setFormError(`Image rejected by safety filters: ${result.promptFeedback.blockReason}`);
-      } else {
-        setFormError('Could not extract text from the image. Please ensure the image contains readable text.');
-        console.error("Full AI Response:", result);
-      }
+      setUserRole(role);
     } catch (error) {
-      console.error("Error scanning image:", error);
-      setFormError(error.message || 'An error occurred while scanning the image.');
-    } finally {
-      setIsScanningImage(false);
-      e.target.value = ''; 
+      console.error("Auth error:", error);
+      alert("Failed to authenticate with Firebase.");
+      setIsAuthenticating(false);
     }
-  };
-
-  const handleAddNew = () => {
-    setFormError('');
-    setFormData({ name: '', artist: '', genre: 'Pop', text: '' });
-    setEditingSongId(null);
-    setIsAddingMode(true);
-  };
-
-  const handleEdit = (song) => {
-    setFormError('');
-    setFormData({ name: song.name, artist: song.artist || '', genre: song.genre, text: song.text || '' });
-    setEditingSongId(song.id);
-    setIsAddingMode(true);
   };
 
   const handleSaveSong = async () => {
-    if (!user) {
-      setFormError('Connecting to database... Please wait a moment and try again.');
-      return;
-    }
-    if (!formData.name.trim()) {
-      setFormError('Song name is required.');
-      return;
-    }
+    if (userRole !== 'admin') return;
+    if (!newSong.title.trim()) { alert("Title is required!"); return; }
     
-    setFormError(''); // Clear errors before trying
-    const songsRef = collection(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'songs');
-
+    const collectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'songs');
+    
     try {
       if (editingSongId) {
-        await updateDoc(doc(songsRef, editingSongId), formData);
+        await updateDoc(doc(collectionRef, editingSongId), newSong);
       } else {
-        await addDoc(songsRef, formData);
+        await addDoc(collectionRef, {
+          ...newSong,
+          createdAt: new Date().toISOString()
+        });
       }
       
-      // Reset and close on success
-      setIsAddingMode(false);
-      setFormData({ name: '', artist: '', genre: 'Pop', text: '' });
+      setIsFormOpen(false);
       setEditingSongId(null);
+      setNewSong({ title: '', artist: '', genre: 'Pop', tempo: '', key: '', lyrics: '', youtubeUrl: '' });
+      setScanError('');
     } catch (error) {
-      console.error("Error saving song:", error);
-      if (error.code === 'permission-denied') {
-        setFormError("Permission Denied: You need to update your Firestore Database Rules to allow writes.");
-      } else {
-        setFormError(`Error: ${error.message}`);
-      }
+      console.error("Save error:", error);
+      alert("Failed to save song. Please check permissions.");
     }
   };
 
   const handleDeleteSong = async (id) => {
-    if (confirm("Are you sure you want to delete this song?")) {
-      try {
-        await deleteDoc(doc(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'songs', id));
-        // Remove from any playlists it might be in
-        playlists.forEach(async (playlist) => {
-          if (playlist.songIds?.includes(id)) {
-            const newSongIds = playlist.songIds.filter(songId => songId !== id);
-            await updateDoc(doc(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'playlists', playlist.id), { songIds: newSongIds });
-          }
-        });
-      } catch (error) {
-        console.error("Error deleting song:", error);
-        alert("Failed to delete song. Check your database rules.");
-      }
+    if (userRole !== 'admin') return;
+    if (!confirm("Are you sure you want to delete this song?")) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'songs', id));
+    } catch (error) {
+      console.error("Delete error:", error);
     }
   };
 
+  const handleEdit = (song) => {
+    if (userRole !== 'admin') return;
+    setNewSong({ ...song });
+    setEditingSongId(song.id);
+    setIsFormOpen(true);
+    setScanError('');
+  };
+
+  const handleAddNew = () => {
+    setNewSong({ title: '', artist: '', genre: 'Pop', tempo: '', key: '', lyrics: '', youtubeUrl: '' });
+    setEditingSongId(null);
+    setIsFormOpen(true);
+    setScanError('');
+  };
+
   const handleCreatePlaylist = async () => {
-    if (!newPlaylistName.trim()) return;
+    if (userRole !== 'admin' || !newPlaylistName.trim()) return;
     try {
-      const playlistsRef = collection(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'playlists');
-      await addDoc(playlistsRef, {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'playlists'), {
         name: newPlaylistName,
-        songIds: []
+        songIds: [],
+        createdAt: new Date().toISOString()
       });
       setNewPlaylistName('');
     } catch (error) {
-       console.error("Error creating playlist:", error);
-       alert("Failed to create playlist. Check database rules.");
+      console.error("Create playlist error:", error);
     }
   };
 
   const handleDeletePlaylist = async (id) => {
-    if (confirm("Delete this playlist? (Songs will remain in your library)")) {
-       try {
-         await deleteDoc(doc(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'playlists', id));
-       } catch (error) {
-          console.error("Error deleting playlist:", error);
-       }
+    if (userRole !== 'admin') return;
+    if (!confirm("Delete this playlist?")) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'playlists', id));
+    } catch (error) {
+      console.error("Delete playlist error:", error);
     }
   };
 
   const openPlaylistModal = (songId) => {
+    if (userRole !== 'admin') return;
     setPlaylistModalSongId(songId);
-    // Pre-select playlists this song is already in
-    const activeIds = playlists.filter(p => p.songIds?.includes(songId)).map(p => p.id);
-    setSelectedPlaylistIds(activeIds);
+    
+    // Find which playlists already contain this song
+    const currentPlaylists = playlists.filter(p => p.songIds?.includes(songId)).map(p => p.id);
+    setSelectedPlaylistIds(currentPlaylists);
     setIsPlaylistModalOpen(true);
+  };
+
+  const saveSongToPlaylists = async () => {
+    if (userRole !== 'admin') return;
+    try {
+      for (const playlist of playlists) {
+        const playlistRef = doc(db, 'artifacts', appId, 'public', 'data', 'playlists', playlist.id);
+        const hasSong = playlist.songIds?.includes(playlistModalSongId);
+        const shouldHaveSong = selectedPlaylistIds.includes(playlist.id);
+
+        if (!hasSong && shouldHaveSong) {
+          const newSongIds = [...(playlist.songIds || []), playlistModalSongId];
+          await updateDoc(playlistRef, { songIds: newSongIds });
+        } else if (hasSong && !shouldHaveSong) {
+          const newSongIds = playlist.songIds.filter(id => id !== playlistModalSongId);
+          await updateDoc(playlistRef, { songIds: newSongIds });
+        }
+      }
+      setIsPlaylistModalOpen(false);
+      setPlaylistModalSongId(null);
+      setSelectedPlaylistIds([]);
+    } catch (error) {
+      console.error("Error updating playlists:", error);
+    }
   };
 
   const togglePlaylistSelection = (playlistId) => {
@@ -444,101 +305,106 @@ export default function RepertoireApp() {
     );
   };
 
-  const savePlaylistSelection = async () => {
+  const handleAddWishlist = async () => {
+    if (!newWishlistSong.name.trim()) return;
     try {
-      for (const playlist of playlists) {
-        const isSelected = selectedPlaylistIds.includes(playlist.id);
-        const hasSong = playlist.songIds?.includes(playlistModalSongId);
-        
-        let newSongIds = [...(playlist.songIds || [])];
-        let needsUpdate = false;
-
-        if (isSelected && !hasSong) {
-          newSongIds.push(playlistModalSongId);
-          needsUpdate = true;
-        } else if (!isSelected && hasSong) {
-          newSongIds = newSongIds.filter(id => id !== playlistModalSongId);
-          needsUpdate = true;
-        }
-
-        if (needsUpdate) {
-           await updateDoc(doc(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'playlists', playlist.id), { songIds: newSongIds });
-        }
-      }
-      closePlaylistModal();
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'wishlist'), {
+        name: newWishlistSong.name,
+        artist: newWishlistSong.artist,
+        addedAt: new Date().toISOString()
+      });
+      setNewWishlistSong({ name: '', artist: '' });
     } catch (error) {
-      console.error("Error saving to playlists:", error);
-      alert("Failed to update playlists.");
+       console.error("Error adding to wishlist:", error);
     }
   };
 
-  const closePlaylistModal = () => {
-    setIsPlaylistModalOpen(false);
-    setPlaylistModalSongId(null);
-    setSelectedPlaylistIds([]);
+  const handleDeleteWishlist = async (id) => {
+    if (userRole !== 'admin') return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'wishlist', id));
+    } catch (error) {
+       console.error("Error deleting from wishlist:", error);
+    }
+  };
+
+  const handleGeminiKeySubmit = () => {
+    if (!geminiApiKey.trim()) return;
+    localStorage.setItem('repertoire_gemini_api_key', geminiApiKey.trim());
+    setIsGeminiModalOpen(false);
+    if (fileInputRef.current) {
+      fileInputRef.current.click();
+    }
+  };
+
+  const handleScanClick = () => {
+    if (!geminiApiKey) {
+      setIsGeminiModalOpen(true);
+    } else {
+      fileInputRef.current?.click();
+    }
+  };
+
+  const handleImageUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    setScanError('');
+    setIsScanning(true);
+    
+    try {
+      const base64Image = await fileToBase64(file);
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${geminiApiKey}`;
+      
+      const payload = {
+        contents: [{
+          parts: [
+            { text: "Extract the lyrics and chords from this image. Format the output exactly like this: [Chord]Lyric text. Do not add any extra commentary or markdown code blocks, just return the plain text with bracketed chords inline." },
+            { inlineData: { mimeType: file.type, data: base64Image } }
+          ]
+        }]
+      };
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await response.json();
+
+      if (data.error) {
+        throw new Error(data.error.message || "API Error");
+      }
+
+      if (data.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
+        const text = data.candidates[0].content.parts[0].text;
+        // Clean up markdown block if the model included it despite instructions
+        const cleanText = text.replace(/^```[a-z]*\n/m, '').replace(/```$/m, '').trim();
+        setNewSong(prev => ({ ...prev, lyrics: cleanText }));
+      } else {
+        throw new Error("Could not extract text. Model returned an empty or blocked response.");
+      }
+    } catch (error) {
+      console.error("Scanning error:", error);
+      setScanError(error.message || "Failed to scan image. Check console for details.");
+    } finally {
+      setIsScanning(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''; // Reset input
+      }
+    }
   };
 
   const filteredSongs = songs.filter(song => {
-    const matchesSearch = song.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                          (song.artist && song.artist.toLowerCase().includes(searchQuery.toLowerCase()));
-    const matchesGenre = selectedGenre === 'All' || song.genre === selectedGenre;
+    const matchesSearch = 
+      song.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (song.artist && song.artist.toLowerCase().includes(searchQuery.toLowerCase()));
+    const matchesGenre = genreFilter === 'All' || song.genre === genreFilter;
     return matchesSearch && matchesGenre;
   });
 
-  const currentContextIds = expandedPlaylistId 
-    ? playlists.find(p => p.id === expandedPlaylistId)?.songIds || []
-    : filteredSongs.map(s => s.id);
-
-  const currentSongIndex = viewingSong ? currentContextIds.indexOf(viewingSong.id) : -1;
-
-  const handlePrevSong = () => {
-    if (currentSongIndex > 0) {
-      const prevId = currentContextIds[currentSongIndex - 1];
-      const prevSong = songs.find(s => s.id === prevId);
-      if (prevSong) setViewingSong(prevSong);
-    }
-  };
-
-  const handleNextSong = () => {
-    if (currentSongIndex < currentContextIds.length - 1 && currentSongIndex !== -1) {
-      const nextId = currentContextIds[currentSongIndex + 1];
-      const nextSong = songs.find(s => s.id === nextId);
-      if (nextSong) setViewingSong(nextSong);
-    }
-  };
-
-  if (!isFirebaseReady) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="bg-white max-w-md w-full rounded-2xl shadow-xl p-8 border border-slate-100 text-center">
-          <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-6 text-emerald-600">
-            <Database size={32} />
-          </div>
-          <h1 className="text-2xl font-bold text-slate-800 mb-2">Connect Database</h1>
-          <p className="text-slate-500 mb-8 text-sm">
-            To keep your app secure on GitHub Pages, enter your Firebase Web API Key. You can find it in your <a href="https://console.firebase.google.com/project/_/settings/general" target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline font-semibold">Firebase Project Settings</a>. It will be saved locally on your device.
-          </p>
-          <form onSubmit={handleSaveFirebaseKey} className="space-y-4">
-            <input
-              type="password"
-              value={firebaseKeyInput}
-              onChange={(e) => setFirebaseKeyInput(e.target.value)}
-              placeholder="Firebase API Key..."
-              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-slate-50 text-center"
-            />
-            <button
-              type="submit"
-              className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-md shadow-emerald-200 transition-colors"
-            >
-              Connect Database
-            </button>
-          </form>
-        </div>
-      </div>
-    );
-  }
-
-  if (!isAuthenticated) {
+  if (!userRole) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
         <div className="bg-white max-w-md w-full rounded-2xl shadow-xl p-8 border border-slate-100 text-center">
@@ -546,44 +412,217 @@ export default function RepertoireApp() {
             <Lock size={32} />
           </div>
           <h1 className="text-2xl font-bold text-slate-800 mb-2">My Repertoire</h1>
-          <p className="text-slate-500 mb-8">Enter the password to access the shared collection.</p>
-          <form onSubmit={handleLogin} className="space-y-4">
+          <p className="text-slate-500 mb-8">Log in as an Admin or view the repertoire as a Guest.</p>
+          <form onSubmit={(e) => handleLogin(e, 'admin')} className="space-y-4">
             <input
               type="password"
               value={passwordInput}
               onChange={(e) => setPasswordInput(e.target.value)}
-              placeholder="Password..."
+              placeholder="Admin Password..."
               className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50 text-center text-lg tracking-widest"
+              disabled={isAuthenticating}
             />
-            <button
-              type="submit"
-              className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl shadow-md shadow-indigo-200 transition-colors"
-            >
-              Unlock
-            </button>
+            
+            <div className="space-y-3 pt-2">
+              <button
+                type="submit"
+                disabled={isAuthenticating}
+                className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-bold rounded-xl shadow-md shadow-indigo-200 transition-colors flex items-center justify-center gap-2"
+              >
+                {isAuthenticating ? <Loader2 size={20} className="animate-spin" /> : null}
+                Unlock as Admin
+              </button>
+              
+              <div className="relative flex items-center py-2">
+                <div className="flex-grow border-t border-slate-200"></div>
+                <span className="flex-shrink-0 mx-4 text-slate-400 text-sm font-medium">or</span>
+                <div className="flex-grow border-t border-slate-200"></div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => handleLogin(null, 'guest')}
+                disabled={isAuthenticating}
+                className="w-full py-3 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-bold rounded-xl shadow-sm transition-colors"
+              >
+                Continue as Guest
+              </button>
+            </div>
           </form>
         </div>
       </div>
     );
   }
 
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans selection:bg-indigo-100 selection:text-indigo-900">
+  if (viewingSong) {
+    const hasChords = viewingSong.lyrics && viewingSong.lyrics.includes('[');
+    
+    // Process lyrics to highlight chords and apply transposition
+    const processedLyrics = transposeLyrics(viewingSong.lyrics, transposeSteps);
+    
+    const formattedLyrics = processedLyrics?.split('\n').map((line, idx) => {
+      if (!line.trim()) return <div key={idx} className="h-6"></div>;
       
+      // If no chords in this specific line, just render normal text
+      if (!line.includes('[')) {
+        return (
+          <div key={idx} className="font-mono whitespace-pre-wrap text-slate-800 mb-1 leading-normal">
+            {line}
+          </div>
+        );
+      }
+      
+      let chordLine = "";
+      let lyricLine = "";
+      
+      const parts = line.split(/(\[[^\]]+\])/);
+      
+      parts.forEach(part => {
+        if (!part) return;
+        if (part.startsWith('[') && part.endsWith(']')) {
+          const chord = part.slice(1, -1);
+          // Pad the chord line to match the lyric position
+          if (chordLine.length > lyricLine.length) {
+            chordLine += " "; // Add space between overlapping consecutive chords
+          } else if (chordLine.length < lyricLine.length) {
+            chordLine += " ".repeat(lyricLine.length - chordLine.length);
+          }
+          chordLine += chord;
+        } else {
+          lyricLine += part;
+        }
+      });
+
+      return (
+        <div key={idx} className="font-mono whitespace-pre-wrap mb-3 flex flex-col">
+          {chordLine.trim().length > 0 && (
+            <span className="text-indigo-600 font-bold leading-tight">{chordLine}</span>
+          )}
+          {lyricLine.length > 0 && (
+            <span className="text-slate-800 leading-tight">{lyricLine}</span>
+          )}
+        </div>
+      );
+    });
+
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col">
+        <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
+          <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
+            <button 
+              onClick={() => { setViewingSong(null); setTransposeSteps(0); }}
+              className="flex items-center gap-2 text-slate-600 hover:text-indigo-600 transition-colors font-semibold"
+            >
+              <ChevronLeft size={20} /> Back
+            </button>
+            {userRole === 'admin' && (
+              <button 
+                onClick={() => {
+                  setViewingSong(null);
+                  setTransposeSteps(0);
+                  handleEdit(viewingSong);
+                }}
+                className="flex items-center gap-2 text-emerald-600 hover:text-emerald-700 font-semibold bg-emerald-50 px-4 py-2 rounded-lg"
+              >
+                <Edit2 size={16} /> Edit
+              </button>
+            )}
+          </div>
+        </header>
+
+        <main className="flex-grow max-w-4xl w-full mx-auto px-4 py-8">
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8 md:p-12 relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-indigo-500 to-purple-500"></div>
+            
+            <div className="flex flex-col md:flex-row md:items-start justify-between gap-6 mb-12">
+              <div>
+                <h1 className="text-4xl font-extrabold text-slate-900 mb-2">{viewingSong.title}</h1>
+                {viewingSong.artist && <p className="text-xl text-slate-600 font-medium mb-4">{viewingSong.artist}</p>}
+                
+                <div className="flex flex-wrap gap-2">
+                  <span className="px-3 py-1 bg-indigo-50 text-indigo-700 rounded-full text-sm font-semibold">{viewingSong.genre}</span>
+                  {viewingSong.key && <span className="px-3 py-1 bg-slate-100 text-slate-700 rounded-full text-sm font-semibold flex items-center gap-1"><Music size={14}/> {viewingSong.key}</span>}
+                  {viewingSong.tempo && <span className="px-3 py-1 bg-slate-100 text-slate-700 rounded-full text-sm font-semibold">BPM: {viewingSong.tempo}</span>}
+                </div>
+              </div>
+              
+              {hasChords && (
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 flex flex-col items-center gap-3 shrink-0">
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-500">Transpose</span>
+                  <div className="flex items-center gap-4">
+                    <button 
+                      onClick={() => setTransposeSteps(s => s - 1)}
+                      className="w-10 h-10 rounded-full bg-white border border-slate-200 flex items-center justify-center text-slate-700 hover:bg-slate-100 hover:text-indigo-600 transition-colors shadow-sm"
+                    >
+                      <Minus size={20} />
+                    </button>
+                    <span className="font-mono font-bold text-lg text-slate-800 w-8 text-center">
+                      {transposeSteps > 0 ? `+${transposeSteps}` : transposeSteps}
+                    </span>
+                    <button 
+                      onClick={() => setTransposeSteps(s => s + 1)}
+                      className="w-10 h-10 rounded-full bg-white border border-slate-200 flex items-center justify-center text-slate-700 hover:bg-slate-100 hover:text-indigo-600 transition-colors shadow-sm"
+                    >
+                      <Plus size={20} />
+                    </button>
+                  </div>
+                  {transposeSteps !== 0 && (
+                    <button onClick={() => setTransposeSteps(0)} className="text-xs text-indigo-600 font-semibold hover:underline mt-1">Reset</button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="prose prose-slate max-w-none text-lg">
+              {viewingSong.lyrics ? formattedLyrics : <p className="text-slate-400 italic">No lyrics provided.</p>}
+            </div>
+
+            {viewingSong.youtubeUrl && (
+              <div className="mt-12 pt-8 border-t border-slate-100">
+                <a 
+                  href={viewingSong.youtubeUrl} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 text-indigo-600 font-semibold hover:text-indigo-700 hover:underline"
+                >
+                  <Play size={20} /> Listen on YouTube
+                </a>
+              </div>
+            )}
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 font-sans text-slate-900 pb-20">
       {/* Header */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm">
-        <div className="max-w-5xl mx-auto px-4 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="flex items-center gap-2 text-indigo-600">
-            <Music size={28} className="drop-shadow-sm" />
-            <h1 className="text-2xl font-extrabold tracking-tight">Repertoire</h1>
+        <div className="max-w-6xl mx-auto px-4 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-md">
+                <Music size={24} />
+              </div>
+              <h1 className="text-2xl font-black text-slate-800 tracking-tight">Repertoire</h1>
+            </div>
+            
+            {/* Mobile Tab Switcher */}
+            <div className="flex sm:hidden bg-slate-100 p-1 rounded-lg">
+              <button onClick={() => setActiveTab('library')} className={`p-2 rounded-md ${activeTab === 'library' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}><Hash size={18}/></button>
+              <button onClick={() => setActiveTab('playlists')} className={`p-2 rounded-md ${activeTab === 'playlists' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}><ListMusic size={18}/></button>
+              <button onClick={() => setActiveTab('wishlist')} className={`p-2 rounded-md ${activeTab === 'wishlist' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}><Star size={18}/></button>
+            </div>
           </div>
-          
-          <div className="flex items-center bg-slate-100 p-1 rounded-xl">
+
+          {/* Desktop Tab Switcher */}
+          <div className="hidden sm:flex items-center bg-slate-100 p-1 rounded-xl">
             <button 
-              onClick={() => setActiveTab('library')}
+              onClick={() => { setActiveTab('library'); setExpandedPlaylistId(null); }}
               className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === 'library' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
             >
-              <Music size={16} /> Library
+              <Hash size={16} /> Library
             </button>
             <button 
               onClick={() => { setActiveTab('playlists'); setExpandedPlaylistId(null); }}
@@ -591,106 +630,121 @@ export default function RepertoireApp() {
             >
               <ListMusic size={16} /> Playlists
             </button>
+            <button 
+              onClick={() => { setActiveTab('wishlist'); setExpandedPlaylistId(null); }}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === 'wishlist' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+            >
+              <Star size={16} /> Wishlist
+            </button>
           </div>
+          
+          {userRole === 'guest' && (
+            <div className="hidden sm:block text-xs font-bold uppercase tracking-wider text-slate-400 bg-slate-100 px-3 py-1.5 rounded-full">
+              Guest Mode
+            </div>
+          )}
         </div>
       </header>
 
-      {/* Main Content Area */}
-      <main className="max-w-5xl mx-auto px-4 py-8">
+      <main className="max-w-6xl mx-auto px-4 py-8">
         
-        {/* Top Controls (Search, Filter, Add) - Only visible in Library tab */}
+        {}
         {activeTab === 'library' && (
-          <div className="flex flex-col sm:flex-row gap-4 mb-8">
-            <div className="relative flex-grow">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
-              <input 
-                type="text" 
-                placeholder="Search songs..." 
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-10 pr-4 py-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm transition-shadow"
-              />
-            </div>
-            <div className="flex gap-2">
-              <div className="hidden sm:flex items-center bg-slate-100 p-1 rounded-xl">
-                <button 
-                  onClick={() => setViewMode('grid')}
-                  className={`p-2 rounded-lg transition-all ${viewMode === 'grid' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
-                  title="Grid View"
-                >
-                  <Grid size={20} />
-                </button>
-                <button 
-                  onClick={() => setViewMode('list')}
-                  className={`p-2 rounded-lg transition-all ${viewMode === 'list' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
-                  title="List View"
-                >
-                  <List size={20} />
-                </button>
+          <div>
+            <div className="flex flex-col md:flex-row gap-4 mb-8">
+              <div className="relative flex-grow">
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
+                <input 
+                  type="text" 
+                  placeholder="Search songs or artists..." 
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full pl-12 pr-4 py-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm"
+                />
               </div>
-              <select 
-                value={selectedGenre}
-                onChange={(e) => setSelectedGenre(e.target.value)}
-                className="bg-white border border-slate-200 py-3 px-4 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium text-slate-700 shadow-sm cursor-pointer"
-              >
-                <option value="All">All Genres</option>
-                {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
-              </select>
-              <button 
-                onClick={handleAddNew}
-                className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white py-3 px-6 rounded-xl font-bold transition-all shadow-md shadow-indigo-200 active:scale-95 whitespace-nowrap"
-              >
-                <Plus size={20} /> <span className="hidden sm:inline">New Song</span>
-              </button>
-            </div>
-          </div>
-        )}
+              <div className="flex gap-3">
+                <select 
+                  value={genreFilter}
+                  onChange={(e) => setGenreFilter(e.target.value)}
+                  className="px-4 py-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm font-medium text-slate-700"
+                >
+                  <option value="All">All Genres</option>
+                  {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
+                </select>
+                
+                <div className="flex bg-slate-200 p-1 rounded-xl">
+                  <button 
+                    onClick={() => setViewMode('grid')}
+                    className={`p-2 rounded-lg transition-colors ${viewMode === 'grid' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}
+                    title="Grid View"
+                  >
+                    <Grid size={20} />
+                  </button>
+                  <button 
+                    onClick={() => setViewMode('list')}
+                    className={`p-2 rounded-lg transition-colors ${viewMode === 'list' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}
+                    title="List View"
+                  >
+                    <List size={20} />
+                  </button>
+                </div>
 
-        {/* Library View */}
-        {activeTab === 'library' && (
-          <>
+                {userRole === 'admin' && (
+                  <button 
+                    onClick={handleAddNew}
+                    className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white py-3 px-6 rounded-xl font-bold transition-all shadow-md shadow-indigo-200 active:scale-95 whitespace-nowrap"
+                  >
+                    <Plus size={20} /> <span className="hidden sm:inline">New Song</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
             {filteredSongs.length === 0 ? (
-              <div className="py-12 text-center text-slate-500">
-                <Music size={48} className="mx-auto mb-4 opacity-20" />
-                <p className="text-lg">No songs found.</p>
+              <div className="text-center py-20 bg-white rounded-2xl border border-slate-200 border-dashed">
+                <Music size={48} className="mx-auto text-slate-300 mb-4" />
+                <h3 className="text-lg font-bold text-slate-700 mb-1">No songs found</h3>
+                <p className="text-slate-500">Try adjusting your search or add a new song.</p>
               </div>
             ) : viewMode === 'grid' ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
                 {filteredSongs.map(song => (
-                  <div key={song.id} className="bg-white border border-slate-200 rounded-2xl p-5 hover:border-indigo-300 hover:shadow-lg transition-all group relative overflow-hidden flex flex-col h-full">
-                    <div className="flex justify-between items-start mb-2">
+                  <div key={song.id} className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm hover:shadow-md hover:border-indigo-300 transition-all group flex flex-col h-full">
+                    <div className="flex justify-between items-start mb-4">
                       <div>
-                        <h3 className="text-xl font-bold text-slate-800 pr-4 leading-tight">{song.name}</h3>
-                        {song.artist && <p className="text-sm text-slate-500 font-medium mt-1">{song.artist}</p>}
+                        <h3 className="font-bold text-lg text-slate-800 leading-tight mb-1">{song.title}</h3>
+                        {song.artist && <p className="text-sm font-semibold text-slate-500">{song.artist}</p>}
                       </div>
-                      <span className="px-2.5 py-1 bg-slate-100 text-slate-600 text-xs font-bold uppercase tracking-wider rounded-md border border-slate-200">
-                        {song.genre}
-                      </span>
+                      <span className="text-xs font-bold px-2.5 py-1 bg-slate-100 text-slate-600 rounded-md shrink-0">{song.genre}</span>
                     </div>
                     
-                    <div className="flex-grow mt-2 relative">
-                      <p className="text-sm text-slate-500 font-mono line-clamp-3 whitespace-pre-wrap">{song.text || "No lyrics added."}</p>
-                      <div className="absolute inset-0 bg-gradient-to-t from-white to-transparent pointer-events-none"></div>
+                    <div className="mt-auto pt-6 flex items-center justify-between border-t border-slate-50">
+                      <div className="flex gap-2">
+                        {song.key && <span className="text-xs font-semibold bg-indigo-50 text-indigo-600 px-2 py-1 rounded">{song.key}</span>}
+                        {song.tempo && <span className="text-xs font-semibold bg-slate-100 text-slate-600 px-2 py-1 rounded">{song.tempo} bpm</span>}
+                      </div>
                     </div>
-                    
-                    <div className="mt-4 pt-4 border-t border-slate-100 flex items-center justify-between gap-2">
+
+                    <div className="mt-4 flex gap-2">
                       <button 
                         onClick={() => { setViewingSong(song); setExpandedPlaylistId(null); }}
                         className="flex items-center justify-center gap-1.5 flex-grow bg-indigo-50 hover:bg-indigo-100 text-indigo-700 py-2 rounded-lg font-semibold text-sm transition-colors"
                       >
                         <Play size={16} /> View
                       </button>
-                      <div className="flex gap-1">
-                        <button onClick={() => openPlaylistModal(song.id)} className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="Add to Playlist">
-                          <ListMusic size={18} />
-                        </button>
-                        <button onClick={() => handleEdit(song)} className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors" title="Edit">
-                          <Edit2 size={18} />
-                        </button>
-                        <button onClick={() => handleDeleteSong(song.id)} className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="Delete">
-                          <Trash2 size={18} />
-                        </button>
-                      </div>
+                      {userRole === 'admin' && (
+                        <div className="flex gap-1">
+                          <button onClick={() => openPlaylistModal(song.id)} className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="Add to Playlist">
+                            <ListMusic size={18} />
+                          </button>
+                          <button onClick={() => handleEdit(song)} className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors" title="Edit">
+                            <Edit2 size={18} />
+                          </button>
+                          <button onClick={() => handleDeleteSong(song.id)} className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="Delete">
+                            <Trash2 size={18} />
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -698,118 +752,126 @@ export default function RepertoireApp() {
             ) : (
               <div className="flex flex-col gap-3">
                 {filteredSongs.map(song => (
-                  <div key={song.id} className="bg-white border border-slate-200 rounded-xl p-4 hover:border-indigo-300 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm hover:shadow-md">
-                    <div className="flex-grow min-w-0">
-                      <div className="flex items-center gap-3 mb-1">
-                        <h3 className="text-lg font-bold text-slate-800 truncate">{song.name}</h3>
-                        <span className="px-2 py-0.5 bg-slate-100 text-slate-600 text-[10px] font-bold uppercase tracking-wider rounded border border-slate-200 shrink-0">
-                          {song.genre}
-                        </span>
+                  <div key={song.id} className="bg-white rounded-xl p-4 border border-slate-200 shadow-sm hover:border-indigo-300 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="flex items-center gap-4 flex-grow">
+                      <div className="w-10 h-10 bg-slate-100 rounded-lg flex items-center justify-center text-slate-400 shrink-0">
+                        <Music size={20} />
                       </div>
-                      {song.artist && <p className="text-sm text-slate-500 font-medium truncate">{song.artist}</p>}
+                      <div>
+                        <h3 className="font-bold text-slate-800">{song.title}</h3>
+                        {song.artist && <p className="text-sm font-semibold text-slate-500">{song.artist}</p>}
+                      </div>
                     </div>
                     
-                    <div className="flex items-center gap-2 shrink-0 sm:border-l sm:border-slate-100 sm:pl-4">
-                      <button 
-                        onClick={() => { setViewingSong(song); setExpandedPlaylistId(null); }}
-                        className="flex items-center gap-1.5 px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg font-semibold text-sm transition-colors"
-                      >
-                        <Play size={16} /> View
-                      </button>
-                      <button onClick={() => openPlaylistModal(song.id)} className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="Add to Playlist">
-                        <ListMusic size={18} />
-                      </button>
-                      <button onClick={() => handleEdit(song)} className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors" title="Edit">
-                        <Edit2 size={18} />
-                      </button>
-                      <button onClick={() => handleDeleteSong(song.id)} className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="Delete">
-                        <Trash2 size={18} />
-                      </button>
+                    <div className="flex items-center gap-4 sm:ml-auto">
+                       <span className="hidden md:inline-block text-xs font-bold px-2.5 py-1 bg-slate-100 text-slate-600 rounded-md shrink-0 w-24 text-center">{song.genre}</span>
+                       <div className="flex gap-2">
+                        <button 
+                          onClick={() => { setViewingSong(song); setExpandedPlaylistId(null); }}
+                          className="flex items-center gap-1.5 px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg font-semibold text-sm transition-colors"
+                        >
+                          <Play size={16} /> View
+                        </button>
+                        {userRole === 'admin' && (
+                          <>
+                            <button onClick={() => openPlaylistModal(song.id)} className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="Add to Playlist">
+                              <ListMusic size={18} />
+                            </button>
+                            <button onClick={() => handleEdit(song)} className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors" title="Edit">
+                              <Edit2 size={18} />
+                            </button>
+                            <button onClick={() => handleDeleteSong(song.id)} className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="Delete">
+                              <Trash2 size={18} />
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ))}
               </div>
             )}
-          </>
+          </div>
         )}
 
-        {/* Playlists View */}
+        {}
         {activeTab === 'playlists' && (
           <div className="max-w-3xl mx-auto">
-            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm mb-6">
-              <h2 className="text-lg font-bold text-slate-800 mb-4">Create New Playlist</h2>
-              <div className="flex gap-3">
-                <input 
-                  type="text" 
-                  placeholder="Playlist Name..." 
-                  value={newPlaylistName}
-                  onChange={(e) => setNewPlaylistName(e.target.value)}
-                  className="flex-grow px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-                <button 
-                  onClick={handleCreatePlaylist}
-                  className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-xl font-bold transition-colors shadow-md shadow-indigo-200"
-                >
-                  Create
-                </button>
+            {userRole === 'admin' && (
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm mb-6">
+                <h2 className="text-lg font-bold text-slate-800 mb-4">Create New Playlist</h2>
+                <div className="flex gap-3">
+                  <input 
+                    type="text" 
+                    placeholder="Playlist Name..." 
+                    value={newPlaylistName}
+                    onChange={(e) => setNewPlaylistName(e.target.value)}
+                    className="flex-grow px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <button 
+                    onClick={handleCreatePlaylist}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-xl font-bold transition-colors shadow-md shadow-indigo-200"
+                  >
+                    Create
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="space-y-4">
               {playlists.length === 0 ? (
-                <div className="text-center py-12 text-slate-500">
-                  <ListMusic size={48} className="mx-auto mb-4 opacity-20" />
-                  <p>You haven't created any playlists yet.</p>
-                </div>
+                 <div className="text-center py-12 text-slate-500">No playlists created yet.</div>
               ) : (
                 playlists.map(playlist => {
                   const isExpanded = expandedPlaylistId === playlist.id;
                   const playlistSongs = (playlist.songIds || []).map(id => songs.find(s => s.id === id)).filter(Boolean);
 
                   return (
-                    <div key={playlist.id} className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-shadow">
+                    <div key={playlist.id} className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
                       <div 
-                        className="p-5 flex items-center justify-between cursor-pointer hover:bg-slate-50 transition-colors"
+                        className="p-6 flex items-center justify-between cursor-pointer hover:bg-slate-50 transition-colors"
                         onClick={() => setExpandedPlaylistId(isExpanded ? null : playlist.id)}
                       >
                         <div className="flex items-center gap-4">
-                          <div className={`p-2 rounded-lg ${isExpanded ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>
-                            {isExpanded ? <ChevronDown size={24} /> : <ChevronRight size={24} />}
+                          <div className={`p-3 rounded-xl ${isExpanded ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>
+                            <ListMusic size={24} />
                           </div>
                           <div>
                             <h3 className="text-xl font-bold text-slate-800">{playlist.name}</h3>
                             <p className="text-sm text-slate-500 font-medium">{playlistSongs.length} songs</p>
                           </div>
                         </div>
-                        <button 
-                          onClick={(e) => { e.stopPropagation(); handleDeletePlaylist(playlist.id); }}
-                          className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                        >
-                          <Trash2 size={20} />
-                        </button>
+                        <div className="flex items-center gap-2">
+                          {userRole === 'admin' && (
+                            <button 
+                              onClick={(e) => { e.stopPropagation(); handleDeletePlaylist(playlist.id); }}
+                              className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                            >
+                              <Trash2 size={20} />
+                            </button>
+                          )}
+                          <ChevronDown size={24} className={`text-slate-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                        </div>
                       </div>
 
                       {isExpanded && (
-                        <div className="border-t border-slate-100 bg-slate-50 p-4">
+                        <div className="bg-slate-50 border-t border-slate-100 p-4">
                           {playlistSongs.length === 0 ? (
-                            <p className="text-center text-sm text-slate-500 py-4 italic">No songs in this playlist yet.</p>
+                            <p className="text-center text-slate-500 py-4 text-sm font-medium">Empty playlist</p>
                           ) : (
                             <div className="space-y-2">
                               {playlistSongs.map((song, idx) => (
-                                <div key={song.id} className="bg-white border border-slate-200 p-3 rounded-xl flex items-center justify-between hover:border-indigo-300 transition-colors">
-                                  <div className="flex items-center gap-3">
-                                    <span className="text-slate-400 font-mono text-sm w-6 text-right">{idx + 1}.</span>
+                                <div key={song.id} className="flex items-center justify-between p-3 bg-white border border-slate-200 rounded-xl hover:border-indigo-300 transition-colors">
+                                  <div className="flex items-center gap-4">
+                                    <span className="text-slate-400 font-mono text-sm font-bold w-6 text-right">{idx + 1}.</span>
                                     <div>
-                                      <p className="font-bold text-slate-800">{song.name}</p>
-                                      <p className="text-xs text-slate-500 mt-0.5">
-                                        {song.artist && <span className="font-medium mr-1.5">{song.artist} •</span>}
-                                        <span className="uppercase font-bold tracking-wider">{song.genre}</span>
-                                      </p>
+                                      <h4 className="font-bold text-slate-800">{song.title}</h4>
+                                      {song.artist && <p className="text-xs text-slate-500 font-semibold">{song.artist}</p>}
                                     </div>
                                   </div>
                                   <button 
                                     onClick={() => setViewingSong(song)}
-                                    className="px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-sm font-semibold rounded-lg transition-colors"
+                                    className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-sm font-bold rounded-lg transition-colors"
                                   >
                                     View
                                   </button>
@@ -826,325 +888,250 @@ export default function RepertoireApp() {
             </div>
           </div>
         )}
-      </main>
 
-      {/* Add/Edit Modal */}
-      {isAddingMode && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto border border-slate-200">
-            <div className="p-6">
-              <div className="flex justify-between items-center mb-6">
-                <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
-                  {editingSongId ? <Edit2 className="text-indigo-600" /> : <Plus className="text-indigo-600" />}
-                  {editingSongId ? 'Edit Song' : 'Add New Song'}
-                </h2>
-                <button onClick={() => setIsAddingMode(false)} className="text-slate-400 hover:text-slate-700 p-2 rounded-full hover:bg-slate-100 transition-colors">
-                  <X size={24} />
+        {}
+        {activeTab === 'wishlist' && (
+          <div className="max-w-3xl mx-auto">
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm mb-6">
+              <h2 className="text-lg font-bold text-slate-800 mb-2">Suggest a Song</h2>
+              <p className="text-sm text-slate-500 mb-4">Add a song to the wishlist. Everyone can see these suggestions!</p>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <input 
+                  type="text" 
+                  placeholder="Song Name..." 
+                  value={newWishlistSong.name}
+                  onChange={(e) => setNewWishlistSong({...newWishlistSong, name: e.target.value})}
+                  className="flex-grow px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <input 
+                  type="text" 
+                  placeholder="Artist (Optional)..." 
+                  value={newWishlistSong.artist}
+                  onChange={(e) => setNewWishlistSong({...newWishlistSong, artist: e.target.value})}
+                  className="flex-grow px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <button 
+                  onClick={handleAddWishlist}
+                  disabled={!newWishlistSong.name.trim()}
+                  className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white px-6 py-3 rounded-xl font-bold transition-colors shadow-md shadow-indigo-200 whitespace-nowrap"
+                >
+                  Add to List
                 </button>
               </div>
-
-              {formError && (
-                <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm font-medium flex items-start gap-2">
-                  <span>⚠️</span> {formError}
-                </div>
-              )}
-
-              <div className="space-y-5">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
-                  <div>
-                    <label className="block text-sm font-semibold text-slate-700 mb-1.5">Song Name</label>
-                    <input 
-                      type="text" 
-                      value={formData.name}
-                      onChange={(e) => setFormData({...formData, name: e.target.value})}
-                      className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none bg-slate-50"
-                      placeholder="e.g. Wonderwall"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-slate-700 mb-1.5">Artist (Optional)</label>
-                    <input 
-                      type="text" 
-                      value={formData.artist}
-                      onChange={(e) => setFormData({...formData, artist: e.target.value})}
-                      className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none bg-slate-50"
-                      placeholder="e.g. Oasis"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-slate-700 mb-1.5">Genre</label>
-                    <select 
-                      value={formData.genre}
-                      onChange={(e) => setFormData({...formData, genre: e.target.value})}
-                      className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none bg-slate-50 font-medium text-slate-700 cursor-pointer"
-                    >
-                      {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
-                    </select>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-slate-700 mb-1.5 flex justify-between items-end">
-                    <span>Lyrics & Chords</span>
-                    <span className="text-xs text-indigo-600 font-medium hidden sm:inline">Use [Chords] for smart formatting</span>
-                  </label>
-                  
-                  {/* Smart Chord Toolbar & Image Scanner */}
-                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                    <div className="flex flex-wrap gap-1.5">
-                      {['C', 'G', 'D', 'A', 'E', 'F', 'Am', 'Em', 'Dm'].map(chord => (
-                        <button
-                          key={chord}
-                          type="button"
-                          onMouseDown={(e) => { 
-                            e.preventDefault(); 
-                            insertChord(chord); 
-                          }}
-                          className="px-2.5 py-1 bg-white border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 text-slate-600 text-xs font-bold rounded-lg transition-colors shadow-sm"
-                        >
-                          {chord}
-                        </button>
-                      ))}
-                    </div>
-                    
-                    <div>
-                      <input 
-                        type="file" 
-                        id="image-upload" 
-                        accept="image/*" 
-                        className="hidden" 
-                        onChange={handleImageUpload}
-                        disabled={isScanningImage}
-                      />
-                      <button 
-                        type="button"
-                        onClick={triggerImageUpload}
-                        disabled={isScanningImage}
-                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-bold transition-colors shadow-sm cursor-pointer border ${isScanningImage ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed' : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100'}`}
-                      >
-                        {isScanningImage ? <Loader2 size={16} className="animate-spin" /> : <Camera size={16} />}
-                        {isScanningImage ? 'Scanning...' : 'Scan Image'}
-                      </button>
-                    </div>
-                  </div>
-                  
-                  <textarea 
-                    ref={textareaRef}
-                    value={formData.text}
-                    onChange={(e) => setFormData({...formData, text: e.target.value})}
-                    className="w-full p-3 border border-slate-200 rounded-xl h-64 focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-sm bg-slate-50 leading-relaxed"
-                    placeholder="Type lyrics here... Or type: Today is gonna be the [Em]day"
-                  />
-                </div>
-
-                <div className="pt-4 flex gap-3 justify-end border-t border-slate-100">
-                  <button onClick={() => setIsAddingMode(false)} className="px-6 py-3 rounded-xl font-semibold text-slate-600 hover:bg-slate-100 transition-colors">
-                    Cancel
-                  </button>
-                  <button onClick={handleSaveSong} className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold shadow-md shadow-indigo-200 transition-all active:scale-95 flex items-center gap-2">
-                    <Check size={18} /> Save Song
-                  </button>
-                </div>
-              </div>
             </div>
-            
-            {/* API Key Prompt Modal overlaying the Add/Edit Modal */}
-            {showApiKeyPrompt && (
-               <div className="absolute inset-0 bg-slate-900/60 rounded-2xl flex items-center justify-center p-6 z-50 backdrop-blur-sm">
-                 <div className="bg-white p-6 rounded-2xl shadow-xl max-w-sm w-full border border-slate-200">
-                   <h3 className="text-xl font-bold text-slate-800 mb-2">AI Feature Activation</h3>
-                   <p className="text-sm text-slate-600 mb-4">
-                     To use the AI Image Scanner on your own hosted site, you need a free Google Gemini API Key. 
-                     <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline ml-1">Get one here</a>.
-                   </p>
-                   <input 
-                     type="password"
-                     placeholder="Paste API Key here..."
-                     value={apiKeyInput}
-                     onChange={(e) => setApiKeyInput(e.target.value)}
-                     className="w-full p-3 border border-slate-200 rounded-xl mb-4 focus:ring-2 focus:ring-indigo-500 outline-none"
-                   />
-                   <div className="flex gap-2 justify-end">
-                     <button onClick={() => setShowApiKeyPrompt(false)} className="px-4 py-2 font-semibold text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
-                     <button onClick={handleSaveApiKey} className="px-4 py-2 bg-indigo-600 text-white font-bold rounded-lg shadow-sm hover:bg-indigo-700">Save & Scan</button>
-                   </div>
-                 </div>
-               </div>
-            )}
-          </div>
-        </div>
-      )}
 
-      {/* Playlist Modal */}
-      {isPlaylistModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden border border-slate-200">
-            <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <h2 className="text-lg font-bold text-slate-800">Add to Playlists</h2>
-              <button onClick={closePlaylistModal} className="text-slate-400 hover:text-slate-700 p-1 rounded-full hover:bg-slate-200 transition-colors">
+            <div className="space-y-3">
+              {wishlist.length === 0 ? (
+                <div className="text-center py-12 text-slate-500">
+                  <Star size={48} className="mx-auto mb-4 opacity-20" />
+                  <p>The wishlist is empty. Be the first to suggest a song!</p>
+                </div>
+              ) : (
+                wishlist.map(item => (
+                  <div key={item.id} className="bg-white border border-slate-200 rounded-xl p-4 flex items-center justify-between shadow-sm hover:border-indigo-300 transition-colors">
+                    <div className="flex items-center gap-4">
+                      <div className="p-2 bg-amber-100 text-amber-500 rounded-full">
+                        <Star size={20} className="fill-current" />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-bold text-slate-800">{item.name}</h3>
+                        {item.artist && <p className="text-sm text-slate-500 font-medium">{item.artist}</p>}
+                      </div>
+                    </div>
+                    {userRole === 'admin' && (
+                      <button 
+                        onClick={() => handleDeleteWishlist(item.id)}
+                        className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                        title="Remove from Wishlist"
+                      >
+                        <Trash2 size={18} />
+                      </button>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+      </main>
+
+      {}
+      {isFormOpen && userRole === 'admin' && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl border border-slate-200">
+            <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/50 rounded-t-2xl shrink-0">
+              <h2 className="text-xl font-bold text-slate-800">{editingSongId ? 'Edit Song' : 'Add New Song'}</h2>
+              <button onClick={() => setIsFormOpen(false)} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-colors">
                 <X size={20} />
               </button>
             </div>
             
-            <div className="max-h-64 overflow-y-auto p-4 space-y-2">
-              {playlists.length === 0 ? (
-                 <p className="text-sm text-slate-500 text-center py-4">No playlists available. Create one first!</p>
-              ) : (
-                playlists.map(playlist => {
-                  const isSelected = selectedPlaylistIds.includes(playlist.id);
-                  return (
-                    <div 
-                      key={playlist.id} 
-                      onClick={() => togglePlaylistSelection(playlist.id)}
-                      className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer border ${isSelected ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'bg-white border-slate-200 hover:border-indigo-300 hover:bg-slate-50 text-slate-700'} transition-all`}
+            <div className="p-6 overflow-y-auto flex-grow">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 mb-6">
+                <div className="sm:col-span-2 space-y-1">
+                  <label className="text-sm font-bold text-slate-700">Song Title *</label>
+                  <input type="text" value={newSong.title} onChange={e => setNewSong({...newSong, title: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="e.g. Bohemian Rhapsody" />
+                </div>
+                
+                <div className="sm:col-span-2 space-y-1">
+                  <label className="text-sm font-bold text-slate-700">Artist</label>
+                  <input type="text" value={newSong.artist} onChange={e => setNewSong({...newSong, artist: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="e.g. Queen" />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-sm font-bold text-slate-700">Genre</label>
+                  <select value={newSong.genre} onChange={e => setNewSong({...newSong, genre: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                    {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
+                  </select>
+                </div>
+                
+                <div className="space-y-1">
+                  <label className="text-sm font-bold text-slate-700">Original Key</label>
+                  <input type="text" value={newSong.key} onChange={e => setNewSong({...newSong, key: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="e.g. C, G#m" />
+                </div>
+                
+                <div className="space-y-1">
+                  <label className="text-sm font-bold text-slate-700">Tempo (BPM)</label>
+                  <input type="number" value={newSong.tempo} onChange={e => setNewSong({...newSong, tempo: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="e.g. 120" />
+                </div>
+                
+                <div className="space-y-1">
+                  <label className="text-sm font-bold text-slate-700">YouTube URL</label>
+                  <input type="url" value={newSong.youtubeUrl} onChange={e => setNewSong({...newSong, youtubeUrl: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="https://youtube.com/..." />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                    Lyrics & Chords 
+                    <span className="text-xs font-normal text-slate-400">(Format: [C]Lyric text)</span>
+                  </label>
+                  
+                  {/* AI Scan Button */}
+                  <div>
+                    <input 
+                      type="file" 
+                      accept="image/*" 
+                      ref={fileInputRef} 
+                      onChange={handleImageUpload} 
+                      className="hidden" 
+                    />
+                    <button 
+                      type="button"
+                      onClick={handleScanClick}
+                      disabled={isScanning}
+                      className="flex items-center gap-1.5 text-xs font-bold bg-indigo-100 hover:bg-indigo-200 text-indigo-700 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
                     >
-                      <div className={`w-5 h-5 rounded flex items-center justify-center border ${isSelected ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300 bg-white'}`}>
-                        {isSelected && <Check size={14} strokeWidth={3} />}
+                      {isScanning ? <Loader2 size={14} className="animate-spin" /> : <Camera size={14} />}
+                      {isScanning ? 'Scanning...' : 'Scan Image'}
+                    </button>
+                  </div>
+                </div>
+                
+                {scanError && (
+                  <div className="p-3 bg-red-50 border border-red-100 rounded-xl text-red-600 text-sm font-medium">
+                    {scanError}
+                  </div>
+                )}
+                
+                <textarea 
+                  value={newSong.lyrics} 
+                  onChange={e => setNewSong({...newSong, lyrics: e.target.value})} 
+                  className="w-full p-4 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 h-64 font-mono text-sm leading-relaxed resize-y" 
+                  placeholder="[G]Hello darkness my old [Am]friend..."
+                />
+              </div>
+            </div>
+            
+            <div className="p-6 border-t border-slate-100 bg-slate-50/50 rounded-b-2xl flex justify-end gap-3 shrink-0">
+              <button onClick={() => setIsFormOpen(false)} className="px-6 py-2.5 rounded-xl font-bold text-slate-600 hover:bg-slate-100 transition-colors">Cancel</button>
+              <button onClick={handleSaveSong} className="px-6 py-2.5 rounded-xl font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-md shadow-indigo-200 transition-colors">Save Song</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {}
+      {isPlaylistModalOpen && userRole === 'admin' && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+              <h3 className="font-bold text-slate-800">Add to Playlists</h3>
+              <button onClick={() => setIsPlaylistModalOpen(false)} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg"><X size={18} /></button>
+            </div>
+            <div className="p-2 max-h-60 overflow-y-auto">
+              {playlists.length === 0 ? (
+                <p className="p-4 text-center text-sm text-slate-500">No playlists available.</p>
+              ) : (
+                playlists.map(p => {
+                  const isSelected = selectedPlaylistIds.includes(p.id);
+                  return (
+                    <button 
+                      key={p.id}
+                      onClick={() => togglePlaylistSelection(p.id)}
+                      className={`w-full flex items-center justify-between p-3 rounded-xl mb-1 transition-colors ${isSelected ? 'bg-indigo-50 text-indigo-700' : 'hover:bg-slate-50 text-slate-700'}`}
+                    >
+                      <span className="font-semibold text-sm">{p.name}</span>
+                      <div className={`w-5 h-5 rounded border flex items-center justify-center ${isSelected ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300'}`}>
+                        {isSelected && <Check size={14} />}
                       </div>
-                      <span className="font-semibold">{playlist.name}</span>
-                    </div>
+                    </button>
                   );
                 })
               )}
             </div>
-
-            <div className="p-4 bg-slate-50 border-t border-slate-100 flex gap-2 justify-end">
-               <button onClick={closePlaylistModal} className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-200 rounded-lg transition-colors">
-                 Cancel
-               </button>
-               <button onClick={savePlaylistSelection} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold rounded-lg shadow-sm transition-colors">
-                 OK
-               </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Song Viewer */}
-      {viewingSong && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-2 sm:p-6 z-50">
-          <div className="bg-white w-full max-w-4xl max-h-full rounded-2xl shadow-2xl flex flex-col overflow-hidden">
-            
-            {/* Viewer Header */}
-            <div className="flex justify-between items-center p-4 sm:p-6 border-b border-slate-100 bg-slate-50 relative shrink-0">
-              <div>
-                <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-800 pr-12 leading-tight">{viewingSong.name}</h2>
-                {viewingSong.artist && <p className="text-lg text-slate-600 font-medium mt-1">{viewingSong.artist}</p>}
-                <div className="flex flex-wrap items-center gap-3 mt-2">
-                  <span className="inline-block px-3 py-1 bg-indigo-100 text-indigo-700 text-xs font-bold uppercase tracking-wider rounded-md border border-indigo-200">
-                    {viewingSong.genre}
-                  </span>
-                  {viewingSong.text && viewingSong.text.includes('[') && (
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Transpose</span>
-                      <div className="flex items-center bg-white border border-slate-200 rounded-md shadow-sm h-7">
-                        <button 
-                          onClick={() => setTransposeAmount(prev => prev - 1)}
-                          className="px-2 h-full text-slate-500 hover:text-indigo-600 hover:bg-slate-50 rounded-l-md border-r border-slate-100 flex items-center justify-center transition-colors"
-                        >
-                          <Minus size={14} />
-                        </button>
-                        <span className="w-8 text-center text-xs font-bold text-slate-700">
-                          {transposeAmount > 0 ? `+${transposeAmount}` : transposeAmount}
-                        </span>
-                        <button 
-                          onClick={() => setTransposeAmount(prev => prev + 1)}
-                          className="px-2 h-full text-slate-500 hover:text-indigo-600 hover:bg-slate-50 rounded-r-md border-l border-slate-100 flex items-center justify-center transition-colors"
-                        >
-                          <Plus size={14} />
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-              <button 
-                onClick={() => setViewingSong(null)} 
-                className="absolute top-4 right-4 sm:top-6 sm:right-6 text-slate-400 hover:text-slate-700 p-2 rounded-full hover:bg-slate-200 transition-colors bg-white border border-slate-200 shadow-sm"
-              >
-                <X size={24} />
+            <div className="p-4 border-t border-slate-100">
+              <button onClick={saveSongToPlaylists} className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold transition-colors">
+                Save Selection
               </button>
             </div>
-            
-            {/* Viewer Body (Smart Chords Rendering) */}
-            <div className="p-6 sm:p-10 overflow-y-auto flex-grow bg-white">
-              <div className="font-mono text-slate-800 text-sm sm:text-base md:text-lg max-w-none">
-                {viewingSong.text ? viewingSong.text.replace(/\r\n/g, '\n').split('\n').map((line, i) => {
-                  
-                  // Empty line
-                  if (line.trim() === '') return <div key={i} className="h-6"></div>;
-
-                  // Section header (e.g. [Chorus], [Verse 1])
-                  const isSection = /^\[\s*(verse|chorus|bridge|intro|outro|solo|pre|hook|part|interlude)/i.test(line.trim());
-                  if (isSection) {
-                     return <div key={i} className="text-indigo-600 font-bold font-sans mt-6 mb-2 tracking-wide uppercase text-sm sm:text-base border-b border-slate-200 pb-1">{line.trim().slice(1, -1)}</div>
-                  }
-
-                  // Plain text line
-                  if (!line.includes('[')) return <div key={i} className="min-h-[1.5rem] whitespace-pre-wrap leading-relaxed">{line}</div>;
-                  
-                  // Parse line for smart chords
-                  const parts = line.split(/(\[[^\]]+\])/g).filter(Boolean);
-                  const pairs = [];
-                  let currentChord = '';
-                  
-                  parts.forEach(part => {
-                    if (part.startsWith('[') && part.endsWith(']')) {
-                        // If a chord is already waiting, push it without lyrics (e.g. back-to-back chords)
-                        if (currentChord) {
-                            pairs.push({ chord: currentChord, lyric: '' });
-                        }
-                        currentChord = part.slice(1, -1);
-                    } else {
-                        pairs.push({ chord: currentChord, lyric: part });
-                        currentChord = '';
-                    }
-                  });
-                  if (currentChord) pairs.push({ chord: currentChord, lyric: '' });
-
-                  return (
-                    <div key={i} className="flex flex-wrap items-end mb-4 leading-tight min-h-[3rem]">
-                      {pairs.map((pair, j) => (
-                          <div key={j} className="flex flex-col justify-end min-h-full">
-                            {pair.chord && (
-                                <span className="text-indigo-600 font-bold text-sm sm:text-base font-sans mb-0.5">
-                                  {transposeChord(pair.chord, transposeAmount)}
-                                </span>
-                            )}
-                            <span className="whitespace-pre-wrap">{pair.lyric}</span>
-                          </div>
-                      ))}
-                    </div>
-                  );
-                }) : <span className="text-slate-400 italic font-sans">No lyrics or chords added to this song yet.</span>}
-              </div>
-            </div>
-
-            {/* Viewer Navigation Footer */}
-            {currentContextIds.length > 1 && (
-              <div className="bg-slate-50 p-4 border-t border-slate-100 flex items-center justify-between shrink-0">
-                <button 
-                  onClick={handlePrevSong}
-                  disabled={currentSongIndex <= 0}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold transition-all ${currentSongIndex <= 0 ? 'text-slate-300 cursor-not-allowed' : 'text-indigo-600 hover:bg-indigo-100 hover:shadow-sm'}`}
-                >
-                  <ChevronLeft size={20} /> Prev
-                </button>
-                <span className="text-sm font-semibold text-slate-500">
-                  {currentSongIndex + 1} / {currentContextIds.length}
-                </span>
-                <button 
-                  onClick={handleNextSong}
-                  disabled={currentSongIndex >= currentContextIds.length - 1}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold transition-all ${currentSongIndex >= currentContextIds.length - 1 ? 'text-slate-300 cursor-not-allowed' : 'text-indigo-600 hover:bg-indigo-100 hover:shadow-sm'}`}
-                >
-                  Next <ChevronRight size={20} />
-                </button>
-              </div>
-            )}
           </div>
         </div>
       )}
+
+      {}
+      {isGeminiModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl border border-slate-200 overflow-hidden p-8 text-center">
+            <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-600">
+              <Camera size={32} />
+            </div>
+            <h3 className="text-xl font-bold text-slate-800 mb-2">Enable AI Scanning</h3>
+            <p className="text-sm text-slate-500 mb-6">
+              To scan images into lyrics and chords, you need a free Google Gemini API Key. It will be saved securely in your browser.
+              <br/><br/>
+              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-indigo-600 font-semibold hover:underline">
+                Get free key from Google AI Studio &rarr;
+              </a>
+            </p>
+            
+            <input
+              type="text"
+              value={geminiApiKey}
+              onChange={(e) => setGeminiApiKey(e.target.value)}
+              placeholder="AIzaSy..."
+              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50 text-sm font-mono mb-4 text-center"
+            />
+            
+            <div className="flex gap-3">
+              <button 
+                onClick={() => setIsGeminiModalOpen(false)}
+                className="flex-1 py-3 bg-white border border-slate-200 text-slate-700 font-bold rounded-xl shadow-sm transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleGeminiKeySubmit}
+                className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl shadow-md transition-colors"
+              >
+                Save & Scan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
