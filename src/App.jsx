@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Music, Plus, ListMusic, X, Edit2, Trash2, Play, ChevronRight, ChevronDown, Check, Lock, ChevronLeft } from 'lucide-react';
+import { Search, Music, Plus, ListMusic, X, Edit2, Trash2, Play, ChevronRight, ChevronDown, Check, Lock, ChevronLeft, Camera, Loader2 } from 'lucide-react';
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot } from 'firebase/firestore';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
@@ -39,8 +39,11 @@ export default function RepertoireApp() {
   // Form State
   const [isAddingMode, setIsAddingMode] = useState(false);
   const [editingSongId, setEditingSongId] = useState(null);
-  const [formData, setFormData] = useState({ name: '', genre: 'Pop', text: '' });
+  const [formData, setFormData] = useState({ name: '', artist: '', genre: 'Pop', text: '' });
   const [formError, setFormError] = useState('');
+  const [isScanningImage, setIsScanningImage] = useState(false);
+  const [showApiKeyPrompt, setShowApiKeyPrompt] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState('');
   const textareaRef = useRef(null);
 
   // Viewer State
@@ -141,16 +144,128 @@ export default function RepertoireApp() {
     }, 10);
   };
 
+  const fileToBase64 = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = error => reject(error);
+  });
+
+  const triggerImageUpload = (e) => {
+    // Check if we are in the special Canvas environment which auto-injects keys
+    // OR if the user has already saved their own key
+    const savedKey = localStorage.getItem('gemini_api_key');
+    const isCanvasEnvironment = window.location.hostname.includes('google.com') || window.location.hostname === 'localhost';
+
+    if (savedKey || isCanvasEnvironment) {
+       // We have a key or don't need one, proceed to file selection
+       document.getElementById('image-upload').click();
+    } else {
+       // We need a key from the user
+       setShowApiKeyPrompt(true);
+    }
+  };
+
+  const handleSaveApiKey = () => {
+    if (apiKeyInput.trim()) {
+      localStorage.setItem('gemini_api_key', apiKeyInput.trim());
+      setShowApiKeyPrompt(false);
+      // Immediately open the file picker now that we have a key
+      setTimeout(() => document.getElementById('image-upload').click(), 100);
+    }
+  };
+
+  const handleImageUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    setIsScanningImage(true);
+    setFormError('');
+
+    try {
+      const base64Data = await fileToBase64(file);
+      
+      // Get the key: Either from local storage (if user provided it) or leave empty for Canvas auto-injection
+      const savedKey = localStorage.getItem('gemini_api_key');
+      const apiKey = savedKey ? savedKey : ""; 
+      
+      // Upgraded to Gemini 3 Flash Preview for better image understanding
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+
+      const prompt = `Extract the lyrics and chords from this image. 
+      Convert it into a specific format: Place every chord inside square brackets directly in front of the word or syllable it aligns with based on its position in the image. 
+      For example, if the chord 'G' is placed directly above the word 'Love', output '[G]Love'. 
+      Preserve all verses, choruses, and line breaks. 
+      Return ONLY the plain text result without any markdown formatting blocks like \`\`\`.`;
+
+      const payload = {
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: prompt },
+              {
+                inlineData: {
+                  mimeType: file.type,
+                  data: base64Data
+                }
+              }
+            ]
+          }
+        ]
+      };
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const result = await response.json();
+
+      if (response.status === 400 && savedKey) {
+          // If a bad request happens and we used a saved key, it might be invalid.
+          localStorage.removeItem('gemini_api_key');
+          throw new Error("Invalid API Key. Please try again.");
+      }
+      
+      if (result.error) {
+          throw new Error(`API Error: ${result.error.message}`);
+      }
+      
+      if (result.candidates && result.candidates.length > 0 && result.candidates[0].content) {
+        let extractedText = result.candidates[0].content.parts[0].text;
+        extractedText = extractedText.replace(/^```[a-z]*\n/i, '').replace(/\n```$/i, '');
+        
+        setFormData(prev => ({ 
+          ...prev, 
+          text: prev.text ? prev.text + '\n\n' + extractedText : extractedText 
+        }));
+      } else if (result.promptFeedback) {
+        setFormError(`Image rejected by safety filters: ${result.promptFeedback.blockReason}`);
+      } else {
+        setFormError('Could not extract text from the image. Please ensure the image contains readable text.');
+        console.error("Full AI Response:", result);
+      }
+    } catch (error) {
+      console.error("Error scanning image:", error);
+      setFormError(error.message || 'An error occurred while scanning the image.');
+    } finally {
+      setIsScanningImage(false);
+      e.target.value = ''; 
+    }
+  };
+
   const handleAddNew = () => {
     setFormError('');
-    setFormData({ name: '', genre: 'Pop', text: '' });
+    setFormData({ name: '', artist: '', genre: 'Pop', text: '' });
     setEditingSongId(null);
     setIsAddingMode(true);
   };
 
   const handleEdit = (song) => {
     setFormError('');
-    setFormData({ name: song.name, genre: song.genre, text: song.text || '' });
+    setFormData({ name: song.name, artist: song.artist || '', genre: song.genre, text: song.text || '' });
     setEditingSongId(song.id);
     setIsAddingMode(true);
   };
@@ -177,7 +292,7 @@ export default function RepertoireApp() {
       
       // Reset and close on success
       setIsAddingMode(false);
-      setFormData({ name: '', genre: 'Pop', text: '' });
+      setFormData({ name: '', artist: '', genre: 'Pop', text: '' });
       setEditingSongId(null);
     } catch (error) {
       console.error("Error saving song:", error);
@@ -283,7 +398,8 @@ export default function RepertoireApp() {
   };
 
   const filteredSongs = songs.filter(song => {
-    const matchesSearch = song.name.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesSearch = song.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                          (song.artist && song.artist.toLowerCase().includes(searchQuery.toLowerCase()));
     const matchesGenre = selectedGenre === 'All' || song.genre === selectedGenre;
     return matchesSearch && matchesGenre;
   });
@@ -414,7 +530,10 @@ export default function RepertoireApp() {
               filteredSongs.map(song => (
                 <div key={song.id} className="bg-white border border-slate-200 rounded-2xl p-5 hover:border-indigo-300 hover:shadow-lg transition-all group relative overflow-hidden flex flex-col h-full">
                   <div className="flex justify-between items-start mb-2">
-                    <h3 className="text-xl font-bold text-slate-800 pr-4 leading-tight">{song.name}</h3>
+                    <div>
+                      <h3 className="text-xl font-bold text-slate-800 pr-4 leading-tight">{song.name}</h3>
+                      {song.artist && <p className="text-sm text-slate-500 font-medium mt-1">{song.artist}</p>}
+                    </div>
                     <span className="px-2.5 py-1 bg-slate-100 text-slate-600 text-xs font-bold uppercase tracking-wider rounded-md border border-slate-200">
                       {song.genre}
                     </span>
@@ -518,7 +637,10 @@ export default function RepertoireApp() {
                                     <span className="text-slate-400 font-mono text-sm w-6 text-right">{idx + 1}.</span>
                                     <div>
                                       <p className="font-bold text-slate-800">{song.name}</p>
-                                      <p className="text-xs text-slate-500 uppercase font-bold tracking-wider">{song.genre}</p>
+                                      <p className="text-xs text-slate-500 mt-0.5">
+                                        {song.artist && <span className="font-medium mr-1.5">{song.artist} •</span>}
+                                        <span className="uppercase font-bold tracking-wider">{song.genre}</span>
+                                      </p>
                                     </div>
                                   </div>
                                   <button 
@@ -542,7 +664,7 @@ export default function RepertoireApp() {
         )}
       </main>
 
-      {}
+      {/* Add/Edit Modal */}
       {isAddingMode && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto border border-slate-200">
@@ -565,7 +687,7 @@ export default function RepertoireApp() {
 
               <div className="space-y-5">
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
-                  <div className="sm:col-span-2">
+                  <div>
                     <label className="block text-sm font-semibold text-slate-700 mb-1.5">Song Name</label>
                     <input 
                       type="text" 
@@ -573,6 +695,16 @@ export default function RepertoireApp() {
                       onChange={(e) => setFormData({...formData, name: e.target.value})}
                       className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none bg-slate-50"
                       placeholder="e.g. Wonderwall"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1.5">Artist (Optional)</label>
+                    <input 
+                      type="text" 
+                      value={formData.artist}
+                      onChange={(e) => setFormData({...formData, artist: e.target.value})}
+                      className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none bg-slate-50"
+                      placeholder="e.g. Oasis"
                     />
                   </div>
                   <div>
@@ -593,21 +725,43 @@ export default function RepertoireApp() {
                     <span className="text-xs text-indigo-600 font-medium hidden sm:inline">Use [Chords] for smart formatting</span>
                   </label>
                   
-                  {/* Smart Chord Toolbar */}
-                  <div className="flex flex-wrap gap-1.5 mb-2">
-                    {['C', 'G', 'D', 'A', 'E', 'F', 'Am', 'Em', 'Dm'].map(chord => (
-                      <button
-                        key={chord}
+                  {/* Smart Chord Toolbar & Image Scanner */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                    <div className="flex flex-wrap gap-1.5">
+                      {['C', 'G', 'D', 'A', 'E', 'F', 'Am', 'Em', 'Dm'].map(chord => (
+                        <button
+                          key={chord}
+                          type="button"
+                          onMouseDown={(e) => { 
+                            e.preventDefault(); 
+                            insertChord(chord); 
+                          }}
+                          className="px-2.5 py-1 bg-white border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 text-slate-600 text-xs font-bold rounded-lg transition-colors shadow-sm"
+                        >
+                          {chord}
+                        </button>
+                      ))}
+                    </div>
+                    
+                    <div>
+                      <input 
+                        type="file" 
+                        id="image-upload" 
+                        accept="image/*" 
+                        className="hidden" 
+                        onChange={handleImageUpload}
+                        disabled={isScanningImage}
+                      />
+                      <button 
                         type="button"
-                        onMouseDown={(e) => { 
-                          e.preventDefault(); // CRITICAL FIX: Prevents textarea from losing focus!
-                          insertChord(chord); 
-                        }}
-                        className="px-2.5 py-1 bg-white border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 text-slate-600 text-xs font-bold rounded-lg transition-colors shadow-sm"
+                        onClick={triggerImageUpload}
+                        disabled={isScanningImage}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-bold transition-colors shadow-sm cursor-pointer border ${isScanningImage ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed' : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100'}`}
                       >
-                        {chord}
+                        {isScanningImage ? <Loader2 size={16} className="animate-spin" /> : <Camera size={16} />}
+                        {isScanningImage ? 'Scanning...' : 'Scan Image'}
                       </button>
-                    ))}
+                    </div>
                   </div>
                   
                   <textarea 
@@ -629,11 +783,35 @@ export default function RepertoireApp() {
                 </div>
               </div>
             </div>
+            
+            {/* API Key Prompt Modal overlaying the Add/Edit Modal */}
+            {showApiKeyPrompt && (
+               <div className="absolute inset-0 bg-slate-900/60 rounded-2xl flex items-center justify-center p-6 z-50 backdrop-blur-sm">
+                 <div className="bg-white p-6 rounded-2xl shadow-xl max-w-sm w-full border border-slate-200">
+                   <h3 className="text-xl font-bold text-slate-800 mb-2">AI Feature Activation</h3>
+                   <p className="text-sm text-slate-600 mb-4">
+                     To use the AI Image Scanner on your own hosted site, you need a free Google Gemini API Key. 
+                     <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline ml-1">Get one here</a>.
+                   </p>
+                   <input 
+                     type="password"
+                     placeholder="Paste API Key here..."
+                     value={apiKeyInput}
+                     onChange={(e) => setApiKeyInput(e.target.value)}
+                     className="w-full p-3 border border-slate-200 rounded-xl mb-4 focus:ring-2 focus:ring-indigo-500 outline-none"
+                   />
+                   <div className="flex gap-2 justify-end">
+                     <button onClick={() => setShowApiKeyPrompt(false)} className="px-4 py-2 font-semibold text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
+                     <button onClick={handleSaveApiKey} className="px-4 py-2 bg-indigo-600 text-white font-bold rounded-lg shadow-sm hover:bg-indigo-700">Save & Scan</button>
+                   </div>
+                 </div>
+               </div>
+            )}
           </div>
         </div>
       )}
 
-      {}
+      {/* Playlist Modal */}
       {isPlaylistModalOpen && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden border border-slate-200">
@@ -678,7 +856,7 @@ export default function RepertoireApp() {
         </div>
       )}
 
-      {}
+      {/* Song Viewer */}
       {viewingSong && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-2 sm:p-6 z-50">
           <div className="bg-white w-full max-w-4xl max-h-full rounded-2xl shadow-2xl flex flex-col overflow-hidden">
@@ -687,6 +865,7 @@ export default function RepertoireApp() {
             <div className="flex justify-between items-center p-4 sm:p-6 border-b border-slate-100 bg-slate-50 relative shrink-0">
               <div>
                 <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-800 pr-12 leading-tight">{viewingSong.name}</h2>
+                {viewingSong.artist && <p className="text-lg text-slate-600 font-medium mt-1">{viewingSong.artist}</p>}
                 <span className="inline-block mt-2 px-3 py-1 bg-indigo-100 text-indigo-700 text-xs font-bold uppercase tracking-wider rounded-md border border-indigo-200">
                   {viewingSong.genre}
                 </span>
