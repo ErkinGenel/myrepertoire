@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Music, Plus, ListMusic, X, Edit2, Trash2, Play, ChevronRight, ChevronDown, Check, Lock, ChevronLeft, Camera, Loader2, Database, Grid, List, Minus, Star, Hash } from 'lucide-react';
+import { Search, Music, Plus, ListMusic, X, Edit2, Trash2, Play, ChevronRight, ChevronDown, Check, Lock, ChevronLeft, Camera, Loader2, Database, Grid, List, Minus, Star, Hash, ChevronUp } from 'lucide-react';
 import { initializeApp, getApps } from "firebase/app";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
 import { getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc, updateDoc } from "firebase/firestore";
@@ -77,6 +77,8 @@ export default function RepertoireApp() {
   // Auth & Roles
   const [userRole, setUserRole] = useState(null); // 'admin', 'guest', or null
   const [passwordInput, setPasswordInput] = useState('');
+  const [guestNameInput, setGuestNameInput] = useState('');
+  const [guestName, setGuestName] = useState('');
   const [user, setUser] = useState(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
 
@@ -98,7 +100,7 @@ export default function RepertoireApp() {
   // Form States
   const [newSong, setNewSong] = useState({ title: '', artist: '', genre: 'Pop', tempo: '', key: '', lyrics: '', youtubeUrl: '' });
   const [newPlaylistName, setNewPlaylistName] = useState('');
-  const [newWishlistSong, setNewWishlistSong] = useState({ name: '', artist: '' });
+  const [selectedWishlistSongId, setSelectedWishlistSongId] = useState('');
   
   // Playlist Management
   const [expandedPlaylistId, setExpandedPlaylistId] = useState(null);
@@ -179,6 +181,12 @@ export default function RepertoireApp() {
     try {
       if (!user && auth) {
         await signInAnonymously(auth);
+      }
+      if (role === 'guest') {
+        setGuestName(guestNameInput.trim());
+        setActiveTab('wishlist');
+      } else {
+        setActiveTab('library');
       }
       setUserRole(role);
     } catch (error) {
@@ -306,14 +314,24 @@ export default function RepertoireApp() {
   };
 
   const handleAddWishlist = async () => {
-    if (!newWishlistSong.name.trim()) return;
+    if (!selectedWishlistSongId) return;
+    const song = songs.find(s => s.id === selectedWishlistSongId);
+    if (!song) return;
+
+    // Determine the next order index (put it at the bottom of the list)
+    const newOrder = wishlist.length > 0 ? Math.max(...wishlist.map(w => w.order ?? 0)) + 1 : 0;
+    const requestor = userRole === 'guest' && guestName ? guestName : (userRole === 'admin' ? 'Admin' : '');
+
     try {
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'wishlist'), {
-        name: newWishlistSong.name,
-        artist: newWishlistSong.artist,
-        addedAt: new Date().toISOString()
+        songId: song.id,
+        title: song.title,
+        artist: song.artist,
+        addedAt: new Date().toISOString(),
+        order: newOrder,
+        requestedBy: requestor
       });
-      setNewWishlistSong({ name: '', artist: '' });
+      setSelectedWishlistSongId('');
     } catch (error) {
        console.error("Error adding to wishlist:", error);
     }
@@ -325,6 +343,61 @@ export default function RepertoireApp() {
       await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'wishlist', id));
     } catch (error) {
        console.error("Error deleting from wishlist:", error);
+    }
+  };
+
+  const handleClearWishlist = async () => {
+    if (userRole !== 'admin') return;
+    if (!confirm("Are you sure you want to clear all songs from the wishlist?")) return;
+    try {
+      const deletePromises = wishlist.map(item =>
+        deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'wishlist', item.id))
+      );
+      await Promise.all(deletePromises);
+    } catch (error) {
+      console.error("Error clearing wishlist:", error);
+    }
+  };
+
+  const handleTogglePlayed = async (id, currentStatus) => {
+    if (userRole !== 'admin') return;
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'wishlist', id), {
+        played: !currentStatus
+      });
+    } catch (error) {
+      console.error("Error toggling played status:", error);
+    }
+  };
+
+  const handleMoveWishlist = async (index, direction) => {
+    if (userRole !== 'admin') return;
+    if (direction === 'up' && index === 0) return;
+    if (direction === 'down' && index === sortedWishlist.length - 1) return;
+
+    const targetIndex = direction === 'up' ? index - 1 : index + 1;
+    const currentItem = sortedWishlist[index];
+    const targetItem = sortedWishlist[targetIndex];
+
+    const currentOrder = currentItem.order !== undefined ? currentItem.order : index;
+    const targetOrder = targetItem.order !== undefined ? targetItem.order : targetIndex;
+
+    let finalCurrentOrder = targetOrder;
+    let finalTargetOrder = currentOrder;
+    
+    // Fallback swap to force reorder if they happen to share the exact same order value
+    if (finalCurrentOrder === finalTargetOrder) {
+      finalCurrentOrder = targetIndex;
+      finalTargetOrder = index;
+    }
+
+    try {
+      await Promise.all([
+        updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'wishlist', currentItem.id), { order: finalCurrentOrder }),
+        updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'wishlist', targetItem.id), { order: finalTargetOrder })
+      ]);
+    } catch (error) {
+      console.error("Error reordering wishlist:", error);
     }
   };
 
@@ -396,6 +469,14 @@ export default function RepertoireApp() {
     }
   };
 
+  // Sort wishlist by order, then by addedAt
+  const sortedWishlist = [...wishlist].sort((a, b) => {
+    const orderA = a.order !== undefined ? a.order : 0;
+    const orderB = b.order !== undefined ? b.order : 0;
+    if (orderA !== orderB) return orderA - orderB;
+    return new Date(a.addedAt) - new Date(b.addedAt);
+  });
+
   const filteredSongs = songs.filter(song => {
     const matchesSearch = 
       song.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -413,17 +494,17 @@ export default function RepertoireApp() {
           </div>
           <h1 className="text-2xl font-bold text-slate-800 mb-2">My Repertoire</h1>
           <p className="text-slate-500 mb-8">Log in as an Admin or view the repertoire as a Guest.</p>
-          <form onSubmit={(e) => handleLogin(e, 'admin')} className="space-y-4">
-            <input
-              type="password"
-              value={passwordInput}
-              onChange={(e) => setPasswordInput(e.target.value)}
-              placeholder="Admin Password..."
-              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50 text-center text-lg tracking-widest"
-              disabled={isAuthenticating}
-            />
-            
-            <div className="space-y-3 pt-2">
+          
+          <div className="space-y-6">
+            <form onSubmit={(e) => handleLogin(e, 'admin')} className="space-y-3">
+              <input
+                type="password"
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                placeholder="Admin Password..."
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50 text-center text-lg tracking-widest"
+                disabled={isAuthenticating}
+              />
               <button
                 type="submit"
                 disabled={isAuthenticating}
@@ -432,23 +513,32 @@ export default function RepertoireApp() {
                 {isAuthenticating ? <Loader2 size={20} className="animate-spin" /> : null}
                 Unlock as Admin
               </button>
-              
-              <div className="relative flex items-center py-2">
-                <div className="flex-grow border-t border-slate-200"></div>
-                <span className="flex-shrink-0 mx-4 text-slate-400 text-sm font-medium">or</span>
-                <div className="flex-grow border-t border-slate-200"></div>
-              </div>
+            </form>
+            
+            <div className="relative flex items-center">
+              <div className="flex-grow border-t border-slate-200"></div>
+              <span className="flex-shrink-0 mx-4 text-slate-400 text-sm font-medium">or</span>
+              <div className="flex-grow border-t border-slate-200"></div>
+            </div>
 
+            <form onSubmit={(e) => handleLogin(e, 'guest')} className="space-y-3">
+              <input
+                type="text"
+                value={guestNameInput}
+                onChange={(e) => setGuestNameInput(e.target.value)}
+                placeholder="Your Name (Optional)"
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50 text-center text-lg"
+                disabled={isAuthenticating}
+              />
               <button
-                type="button"
-                onClick={() => handleLogin(null, 'guest')}
+                type="submit"
                 disabled={isAuthenticating}
                 className="w-full py-3 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-bold rounded-xl shadow-sm transition-colors"
               >
                 Continue as Guest
               </button>
-            </div>
-          </form>
+            </form>
+          </div>
         </div>
       </div>
     );
@@ -609,38 +699,42 @@ export default function RepertoireApp() {
             </div>
             
             {/* Mobile Tab Switcher */}
-            <div className="flex sm:hidden bg-slate-100 p-1 rounded-lg">
-              <button onClick={() => setActiveTab('library')} className={`p-2 rounded-md ${activeTab === 'library' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}><Hash size={18}/></button>
-              <button onClick={() => setActiveTab('playlists')} className={`p-2 rounded-md ${activeTab === 'playlists' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}><ListMusic size={18}/></button>
-              <button onClick={() => setActiveTab('wishlist')} className={`p-2 rounded-md ${activeTab === 'wishlist' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}><Star size={18}/></button>
-            </div>
+            {userRole === 'admin' && (
+              <div className="flex sm:hidden bg-slate-100 p-1 rounded-lg">
+                <button onClick={() => setActiveTab('library')} className={`p-2 rounded-md ${activeTab === 'library' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}><Hash size={18}/></button>
+                <button onClick={() => setActiveTab('playlists')} className={`p-2 rounded-md ${activeTab === 'playlists' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}><ListMusic size={18}/></button>
+                <button onClick={() => setActiveTab('wishlist')} className={`p-2 rounded-md ${activeTab === 'wishlist' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}><Star size={18}/></button>
+              </div>
+            )}
           </div>
 
           {/* Desktop Tab Switcher */}
-          <div className="hidden sm:flex items-center bg-slate-100 p-1 rounded-xl">
-            <button 
-              onClick={() => { setActiveTab('library'); setExpandedPlaylistId(null); }}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === 'library' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-            >
-              <Hash size={16} /> Library
-            </button>
-            <button 
-              onClick={() => { setActiveTab('playlists'); setExpandedPlaylistId(null); }}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === 'playlists' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-            >
-              <ListMusic size={16} /> Playlists
-            </button>
-            <button 
-              onClick={() => { setActiveTab('wishlist'); setExpandedPlaylistId(null); }}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === 'wishlist' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-            >
-              <Star size={16} /> Wishlist
-            </button>
-          </div>
+          {userRole === 'admin' && (
+            <div className="hidden sm:flex items-center bg-slate-100 p-1 rounded-xl">
+              <button 
+                onClick={() => { setActiveTab('library'); setExpandedPlaylistId(null); }}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === 'library' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                <Hash size={16} /> Library
+              </button>
+              <button 
+                onClick={() => { setActiveTab('playlists'); setExpandedPlaylistId(null); }}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === 'playlists' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                <ListMusic size={16} /> Playlists
+              </button>
+              <button 
+                onClick={() => { setActiveTab('wishlist'); setExpandedPlaylistId(null); }}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === 'wishlist' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                <Star size={16} /> Wishlist
+              </button>
+            </div>
+          )}
           
           {userRole === 'guest' && (
-            <div className="hidden sm:block text-xs font-bold uppercase tracking-wider text-slate-400 bg-slate-100 px-3 py-1.5 rounded-full">
-              Guest Mode
+            <div className="hidden sm:block text-xs font-bold uppercase tracking-wider text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full">
+              {guestName ? `Guest: ${guestName}` : 'Guest Mode'}
             </div>
           )}
         </div>
@@ -649,7 +743,7 @@ export default function RepertoireApp() {
       <main className="max-w-6xl mx-auto px-4 py-8">
         
         {}
-        {activeTab === 'library' && (
+        {activeTab === 'library' && userRole === 'admin' && (
           <div>
             <div className="flex flex-col md:flex-row gap-4 mb-8">
               <div className="relative flex-grow">
@@ -795,7 +889,7 @@ export default function RepertoireApp() {
         )}
 
         {}
-        {activeTab === 'playlists' && (
+        {activeTab === 'playlists' && userRole === 'admin' && (
           <div className="max-w-3xl mx-auto">
             {userRole === 'admin' && (
               <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm mb-6">
@@ -892,60 +986,102 @@ export default function RepertoireApp() {
         {}
         {activeTab === 'wishlist' && (
           <div className="max-w-3xl mx-auto">
-            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm mb-6">
-              <h2 className="text-lg font-bold text-slate-800 mb-2">Suggest a Song</h2>
-              <p className="text-sm text-slate-500 mb-4">Add a song to the wishlist. Everyone can see these suggestions!</p>
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm mb-6 relative">
+              {userRole === 'admin' && wishlist.length > 0 && (
+                <button 
+                  onClick={handleClearWishlist}
+                  className="absolute top-6 right-6 text-sm font-bold text-red-500 hover:text-red-700 bg-red-50 px-3 py-1.5 rounded-lg transition-colors"
+                >
+                  Clear Wishlist
+                </button>
+              )}
+              <h2 className="text-lg font-bold text-slate-800 mb-2">Request a Song</h2>
+              <p className="text-sm text-slate-500 mb-4">Select a song from the library to add it to the request queue.</p>
               <div className="flex flex-col sm:flex-row gap-3">
-                <input 
-                  type="text" 
-                  placeholder="Song Name..." 
-                  value={newWishlistSong.name}
-                  onChange={(e) => setNewWishlistSong({...newWishlistSong, name: e.target.value})}
-                  className="flex-grow px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-                <input 
-                  type="text" 
-                  placeholder="Artist (Optional)..." 
-                  value={newWishlistSong.artist}
-                  onChange={(e) => setNewWishlistSong({...newWishlistSong, artist: e.target.value})}
-                  className="flex-grow px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                />
+                <select 
+                  value={selectedWishlistSongId}
+                  onChange={(e) => setSelectedWishlistSongId(e.target.value)}
+                  className="flex-grow px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+                >
+                  <option value="">-- Choose a song from the repertoire --</option>
+                  {[...songs].sort((a,b) => a.title.localeCompare(b.title)).map(song => (
+                    <option key={song.id} value={song.id}>
+                      {song.title} {song.artist ? `- ${song.artist}` : ''}
+                    </option>
+                  ))}
+                </select>
                 <button 
                   onClick={handleAddWishlist}
-                  disabled={!newWishlistSong.name.trim()}
+                  disabled={!selectedWishlistSongId}
                   className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white px-6 py-3 rounded-xl font-bold transition-colors shadow-md shadow-indigo-200 whitespace-nowrap"
                 >
-                  Add to List
+                  Add Request
                 </button>
               </div>
             </div>
 
             <div className="space-y-3">
-              {wishlist.length === 0 ? (
+              {sortedWishlist.length === 0 ? (
                 <div className="text-center py-12 text-slate-500">
                   <Star size={48} className="mx-auto mb-4 opacity-20" />
-                  <p>The wishlist is empty. Be the first to suggest a song!</p>
+                  <p>The queue is empty. Be the first to request a song!</p>
                 </div>
               ) : (
-                wishlist.map(item => (
-                  <div key={item.id} className="bg-white border border-slate-200 rounded-xl p-4 flex items-center justify-between shadow-sm hover:border-indigo-300 transition-colors">
+                sortedWishlist.map((item, index) => (
+                  <div key={item.id} className={`border rounded-xl p-4 flex items-center justify-between shadow-sm transition-colors ${item.played ? 'bg-slate-50 border-slate-200 opacity-75' : 'bg-white border-slate-200 hover:border-indigo-300'}`}>
                     <div className="flex items-center gap-4">
-                      <div className="p-2 bg-amber-100 text-amber-500 rounded-full">
-                        <Star size={20} className="fill-current" />
+                      <div className="flex-shrink-0 w-8 text-center text-slate-400 font-bold font-mono">
+                        {index + 1}.
+                      </div>
+                      <div className={`p-2 rounded-full ${item.played ? 'bg-emerald-100 text-emerald-500' : 'bg-amber-100 text-amber-500'}`}>
+                        {item.played ? <Check size={20} /> : <Star size={20} className="fill-current" />}
                       </div>
                       <div>
-                        <h3 className="text-lg font-bold text-slate-800">{item.name}</h3>
-                        {item.artist && <p className="text-sm text-slate-500 font-medium">{item.artist}</p>}
+                        <div className="flex items-center gap-2">
+                          <h3 className={`text-lg font-bold ${item.played ? 'text-slate-500 line-through' : 'text-slate-800'}`}>{item.title || item.name}</h3>
+                          {item.played && <span className="text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-md">Played</span>}
+                        </div>
+                        {item.artist && <p className={`text-sm font-medium leading-snug ${item.played ? 'text-slate-400' : 'text-slate-500'}`}>{item.artist}</p>}
+                        {item.requestedBy && (
+                          <p className={`text-xs font-semibold mt-1 ${item.played ? 'text-indigo-400' : 'text-indigo-500'}`}>Requested by: {item.requestedBy}</p>
+                        )}
                       </div>
                     </div>
                     {userRole === 'admin' && (
-                      <button 
-                        onClick={() => handleDeleteWishlist(item.id)}
-                        className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                        title="Remove from Wishlist"
-                      >
-                        <Trash2 size={18} />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button 
+                          onClick={() => handleTogglePlayed(item.id, item.played)}
+                          className={`p-2 rounded-lg transition-colors mr-2 ${item.played ? 'text-emerald-600 bg-emerald-100 hover:bg-emerald-200' : 'text-slate-400 hover:text-emerald-600 hover:bg-emerald-50'}`}
+                          title={item.played ? "Mark as Unplayed" : "Mark as Played"}
+                        >
+                          <Check size={18} />
+                        </button>
+                        <div className="flex flex-col gap-1 mr-2">
+                           <button 
+                             onClick={() => handleMoveWishlist(index, 'up')}
+                             disabled={index === 0}
+                             className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded disabled:opacity-30 transition-colors"
+                             title="Move Up"
+                           >
+                             <ChevronUp size={16} />
+                           </button>
+                           <button 
+                             onClick={() => handleMoveWishlist(index, 'down')}
+                             disabled={index === sortedWishlist.length - 1}
+                             className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded disabled:opacity-30 transition-colors"
+                             title="Move Down"
+                           >
+                             <ChevronDown size={16} />
+                           </button>
+                        </div>
+                        <button 
+                          onClick={() => handleDeleteWishlist(item.id)}
+                          className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                          title="Remove from Wishlist"
+                        >
+                          <Trash2 size={18} />
+                        </button>
+                      </div>
                     )}
                   </div>
                 ))
@@ -955,36 +1091,31 @@ export default function RepertoireApp() {
         )}
       </main>
 
-      {}
-      {isFormOpen && userRole === 'admin' && (
+      {/* Forms & Modals */}
+      {isFormOpen && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
-          <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl border border-slate-200">
-            <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/50 rounded-t-2xl shrink-0">
+          <div className="bg-white rounded-2xl w-full max-w-2xl shadow-2xl border border-slate-200 my-8 flex flex-col max-h-[90vh]">
+            <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50 rounded-t-2xl shrink-0">
               <h2 className="text-xl font-bold text-slate-800">{editingSongId ? 'Edit Song' : 'Add New Song'}</h2>
-              <button onClick={() => setIsFormOpen(false)} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-colors">
-                <X size={20} />
-              </button>
+              <button onClick={() => setIsFormOpen(false)} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-lg transition-colors"><X size={20} /></button>
             </div>
             
-            <div className="p-6 overflow-y-auto flex-grow">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 mb-6">
-                <div className="sm:col-span-2 space-y-1">
-                  <label className="text-sm font-bold text-slate-700">Song Title *</label>
-                  <input type="text" value={newSong.title} onChange={e => setNewSong({...newSong, title: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="e.g. Bohemian Rhapsody" />
+            <div className="p-6 overflow-y-auto flex-grow space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <label className="text-sm font-bold text-slate-700">Title *</label>
+                  <input type="text" value={newSong.title} onChange={e => setNewSong({...newSong, title: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Song Title" required />
                 </div>
-                
-                <div className="sm:col-span-2 space-y-1">
+                <div className="space-y-1">
                   <label className="text-sm font-bold text-slate-700">Artist</label>
-                  <input type="text" value={newSong.artist} onChange={e => setNewSong({...newSong, artist: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="e.g. Queen" />
+                  <input type="text" value={newSong.artist} onChange={e => setNewSong({...newSong, artist: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Artist Name" />
                 </div>
-
                 <div className="space-y-1">
                   <label className="text-sm font-bold text-slate-700">Genre</label>
                   <select value={newSong.genre} onChange={e => setNewSong({...newSong, genre: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
                     {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
                   </select>
                 </div>
-                
                 <div className="space-y-1">
                   <label className="text-sm font-bold text-slate-700">Original Key</label>
                   <input type="text" value={newSong.key} onChange={e => setNewSong({...newSong, key: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="e.g. C, G#m" />
